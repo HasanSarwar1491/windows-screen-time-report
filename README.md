@@ -1,60 +1,53 @@
 # screen-time-report
 
-Windows screen-time tracker that calculates daily active hours from Event Log power and display events.
+Windows screen-time reporting using System Event Log power events.
+
+The report includes:
+- Daily screen-on totals for the last 30 days
+- Session segments per day
+- 7-day, 30-day, and cycle summaries against an 8-hour weekday target
+- A detailed daily working-hours table for today
+
+## Files
+
+- `screen_time.py` - main report script
+- `activity_logger.py` - optional local input-state logger utility
+- `install_task.py` - optional scheduler helper for `activity_logger.py`
 
 ## Requirements
 
 - Windows 10/11
 - Python 3.8+
-- `pywin32` package
+- `pywin32`
+
+Install dependency:
 
 ```bash
 pip install pywin32
 ```
 
-## Usage
+## Run
 
 ```bash
 python screen_time.py
 ```
 
-For lock/unlock idle detection (optional, improves accuracy):
+## Optional utilities
+
+If you want to run the activity logger in the background at logon:
 
 ```bash
-# Run PowerShell as Administrator
-python screen_time.py
+python install_task.py
 ```
 
-## How It Works
+To remove that scheduled task:
 
-The script reads the Windows **System** event log for power and display state changes:
+```bash
+python install_task.py --uninstall
+```
 
-| Event | Source | ID | Meaning |
-|-------|--------|----|---------|
-| Display On | Kernel-Power | 507 | User returned / screen woke |
-| Display Off | Kernel-Power | 506 | Idle timeout / screen sleep |
-| Sleep | Kernel-Power | 42 | System entering sleep/hibernate |
-| Shutdown | Kernel-Power | 109 | System shutting down |
-| Boot | Kernel-General | 12 | OS started |
-| Shutdown | Kernel-General | 13 | OS stopped |
-| Wake | Power-Troubleshooter | 1 | Resumed from sleep |
+## Notes
 
-If run as Admin, it also reads **Security** log lock/unlock events (4800/4801) for finer idle detection.
-
-A strict state machine pairs START→STOP events into sessions. Gaps under 5 minutes are merged (configurable via `IDLE_GAP_MINUTES`). Sessions spanning midnight are split across days.
-
-## Output
-
-- **Daily breakdown** — active hours, percentage vs 8h target, first-on/last-off times, and individual session segments
-- **Summaries** — Today, Last 7 Days, Last 30 Days
-- **Billing cycles** — Current and previous 16th-to-15th monthly cycles with hours and percentages
-- Days with zero activity are excluded from the report and percentage calculations
-
-## Configuration
-
-Constants at the top of `screen_time.py`:
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `REQUIRED_HOURS` | `8` | Target hours per weekday |
-| `IDLE_GAP_MINUTES` | `5` | Gaps shorter than this are merged as active time |
+- Core reporting is based on Event Log power events.
+- The script applies event cleanup rules to avoid counting transient wake artifacts.
+- Billing cycle is 16th to 15th.

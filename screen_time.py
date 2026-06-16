@@ -2,7 +2,6 @@ import datetime
 import win32evtlog
 
 REQUIRED_HOURS = 8
-IDLE_GAP_MINUTES = 5
 
 
 def fmt(td):
@@ -30,10 +29,14 @@ def sum_range(daily, start, end):
     required = datetime.timedelta()
     d = start
     while d <= end:
-        has_activity = d in daily and daily[d].total_seconds() > 0
-        if has_activity:
-            total += daily[d]
-            required += required_for_day(d)
+        td = daily.get(d, datetime.timedelta())
+        if td.total_seconds() <= 0:
+            # Zero-activity days are intentionally excluded from both total and required.
+            d += datetime.timedelta(days=1)
+            continue
+
+        total += td
+        required += required_for_day(d)
         d += datetime.timedelta(days=1)
     return total, required
 
@@ -100,101 +103,100 @@ def _classify_system(rec, t):
     src = rec.SourceName.lower()
 
     if "kernel-power" in src:
-        if eid == 507: return ("START", t, "DisplayOn")
-        if eid == 506: return ("STOP",  t, "DisplayOff")
-        if eid == 42:  return ("STOP",  t, "Sleep")
-        if eid == 109: return ("STOP",  t, "Shutdown(KP)")
-
-    if "kernel-general" in src:
-        if eid == 12: return ("START", t, "Boot")
-        if eid == 13: return ("STOP",  t, "Shutdown")
-
-    if "power-troubleshooter" in src:
-        if eid == 1: return ("START", t, "Wake")
+        if eid in (42, 506):
+            return {"time": t, "id": eid, "type": "SLEEP", "label": "KernelPower"}
+        if eid in (107, 507):
+            return {"time": t, "id": eid, "type": "WAKE", "label": "KernelPower"}
 
     if src == "eventlog":
-        if eid == 6005: return ("START", t, "Boot(Evt)")
-        if eid == 6006: return ("STOP",  t, "Off(Evt)")
+        if eid == 6005:
+            return {"time": t, "id": eid, "type": "WAKE", "label": "EventLogBoot"}
+        if eid == 6006:
+            return {"time": t, "id": eid, "type": "SLEEP", "label": "EventLogShutdown"}
 
     return None
 
 
-def _classify_security(rec, t):
-    eid = rec.EventID & 0xFFFF
-    if eid == 4801: return ("START", t, "Unlock")
-    if eid == 4800: return ("STOP",  t, "Lock")
-    return None
+def collect_power_events(start_dt, end_dt):
+    events = _read_log("System", start_dt, _classify_system)
+    events = [e for e in events if start_dt <= e["time"] <= end_dt]
+    events.sort(key=lambda x: x["time"])
+    return events
 
 
-def collect_events(days):
-    cutoff = datetime.datetime.now() - datetime.timedelta(days=days)
-    raw = _read_log("System", cutoff, _classify_system)
-    sec = _read_log("Security", cutoff, _classify_security)
-    raw += sec
-    raw.sort(key=lambda x: x[1])
-    return raw, len(sec) > 0
+def build_slots_for_day(day, all_events, now_dt):
+    day_start = datetime.datetime.combine(day, datetime.time.min)
+    next_midnight = day_start + datetime.timedelta(days=1)
+    day_end = min(next_midnight, now_dt) if day == now_dt.date() else next_midnight
+
+    if day_end <= day_start:
+        return []
+
+    today_events = [e for e in all_events if day_start <= e["time"] <= day_end]
+
+    lookback_start = day_start - datetime.timedelta(hours=2)
+    lookback_events = [e for e in all_events if lookback_start <= e["time"] < day_start]
+    last_pre_event = lookback_events[-1] if lookback_events else None
+    system_on_at_midnight = bool(last_pre_event and last_pre_event["type"] == "WAKE")
+
+    processed = []
+    for idx, event in enumerate(today_events):
+        is_shutdown_artifact_wake = (
+            event["type"] == "WAKE"
+            and event["id"] == 107
+            and idx > 0
+            and today_events[idx - 1]["id"] == 42
+            and (event["time"] - today_events[idx - 1]["time"]).total_seconds() <= 60
+        )
+
+        # Ignore same-second DisplayOn after DisplayOff blips.
+        is_display_blip_wake = (
+            event["type"] == "WAKE"
+            and event["id"] == 507
+            and idx > 0
+            and today_events[idx - 1]["id"] == 506
+            and (event["time"] - today_events[idx - 1]["time"]).total_seconds() == 0
+        )
+
+        if not is_shutdown_artifact_wake and not is_display_blip_wake:
+            processed.append(event)
+
+    slots = []
+    wake_time = day_start if system_on_at_midnight else None
+
+    for event in processed:
+        if event["type"] == "WAKE" and wake_time is None:
+            wake_time = event["time"]
+        elif event["type"] == "SLEEP" and wake_time is not None:
+            duration = (event["time"] - wake_time).total_seconds()
+            if duration > 5:
+                slots.append((wake_time, event["time"]))
+            wake_time = None
+
+    if wake_time is not None:
+        duration = (day_end - wake_time).total_seconds()
+        if duration > 5:
+            slots.append((wake_time, day_end))
+
+    return slots
 
 
-def build_sessions(events):
-    """
-    Strict state machine:
-      OFF  + START → record start, go ON
-      ON   + STOP  → record session, go OFF
-      ON   + START → IGNORE (keep earliest start in this run)
-      OFF  + STOP  → ignore
-    """
-    sessions = []
-    state = "OFF"
-    session_start = None
-
-    for kind, t, _label in events:
-        if state == "OFF":
-            if kind == "START":
-                session_start = t
-                state = "ON"
-        else:
-            if kind == "STOP":
-                sessions.append((session_start, t))
-                session_start = None
-                state = "OFF"
-
-    if state == "ON" and session_start:
-        sessions.append((session_start, datetime.datetime.now()))
-
-    return sessions
-
-
-def merge_short_gaps(sessions, min_gap_minutes=IDLE_GAP_MINUTES):
-    if len(sessions) < 2:
-        return sessions
-    merged = [sessions[0]]
-    for start, end in sessions[1:]:
-        prev_start, prev_end = merged[-1]
-        gap_min = (start - prev_end).total_seconds() / 60
-        if gap_min <= min_gap_minutes:
-            merged[-1] = (prev_start, end)
-        else:
-            merged.append((start, end))
-    return merged
-
-
-def distribute_to_days(sessions):
+def build_daily_summary(start_day, end_day, all_events, now_dt):
     daily = {}
     day_segments = {}
-    for start, end in sessions:
-        cursor = start
-        while cursor.date() < end.date():
-            next_midnight = datetime.datetime.combine(
-                cursor.date() + datetime.timedelta(days=1), datetime.time.min
-            )
-            d = cursor.date()
-            daily[d] = daily.get(d, datetime.timedelta()) + (next_midnight - cursor)
-            day_segments.setdefault(d, []).append((cursor, next_midnight))
-            cursor = next_midnight
-        d = cursor.date()
-        daily[d] = daily.get(d, datetime.timedelta()) + (end - cursor)
-        day_segments.setdefault(d, []).append((cursor, end))
-    return daily, day_segments
+    all_slots = []
+
+    day = start_day
+    while day <= end_day:
+        slots = build_slots_for_day(day, all_events, now_dt)
+        if slots:
+            total_seconds = sum((end - start).total_seconds() for start, end in slots)
+            daily[day] = datetime.timedelta(seconds=total_seconds)
+            day_segments[day] = slots
+            all_slots.extend(slots)
+        day += datetime.timedelta(days=1)
+
+    return daily, day_segments, all_slots
 
 
 def main():
@@ -202,14 +204,16 @@ def main():
     cur_start, cur_end = get_current_cycle(today)
     prev_start, prev_end = get_previous_cycle(cur_start)
 
-    lookback = (today - prev_start).days + 5
-    (events, has_security) = collect_events(days=lookback)
-    raw_sessions = build_sessions(events)
-    sessions = merge_short_gaps(raw_sessions)
-    daily, day_segments = distribute_to_days(sessions)
+    now_dt = datetime.datetime.now()
+    first_needed_day = prev_start
+    system_read_start = datetime.datetime.combine(first_needed_day, datetime.time.min) - datetime.timedelta(hours=2)
+    system_read_end = now_dt
+    events = collect_power_events(system_read_start, system_read_end)
+
+    daily, day_segments, sessions = build_daily_summary(prev_start, today, events, now_dt)
 
     w = 62
-    src_note = "Power + Lock/Unlock" if has_security else "Power + Display (run as Admin for lock events)"
+    src_note = "Kernel-Power + EventLog (slot-based event processing)"
     print("=" * w)
     print("  DAILY SCREEN-ON TIME (Last 30 Days)")
     print(f"  Weekdays: Mon-Fri | Required: 8h/day")
@@ -254,7 +258,13 @@ def main():
     print("=" * w)
 
     today_td = daily.get(today, datetime.timedelta())
-    today_pct = pct(today_td, required_for_day(today)) if is_weekday(today) else "  w/e"
+    today_required = required_for_day(today)
+    if today_td.total_seconds() <= 0:
+        today_pct = "  --"
+    elif (not is_weekday(today)) and today_required.total_seconds() == 0:
+        today_pct = "  w/e"
+    else:
+        today_pct = pct(today_td, today_required)
     print(f"  Today              :  {fmt(today_td):>7}   [{today_pct}]")
 
     t7, r7 = sum_range(daily, today - datetime.timedelta(days=6), today)
@@ -275,22 +285,62 @@ def main():
 
     print("=" * w)
 
-    print(f"\n  Raw sessions       :  {len(raw_sessions)}")
-    print(f"  After merge (<{IDLE_GAP_MINUTES}m) :  {len(sessions)}")
+    print(f"\n  Slots built        :  {len(sessions)}")
     print(f"  Events collected   :  {len(events)}")
-    print(f"  Security log       :  {'Yes' if has_security else 'No (need Admin)'}")
+    print("  Security log       :  Not used")
 
-    print(f"\n{'=' * w}")
-    print(f"  TODAY'S RAW EVENTS ({today.strftime('%d %b %Y')})")
-    print(f"{'=' * w}")
-    today_events = [(k, t, lbl) for k, t, lbl in events if t.date() == today]
-    if today_events:
-        for kind, t, lbl in today_events:
-            arrow = ">>" if kind == "START" else "<<"
-            print(f"  {arrow} {t.strftime('%H:%M:%S')}  {kind:<5}  {lbl}")
+    sep = "=" * 66
+    print("")
+    print(f"  {sep}")
+    print("         LAPTOP WORKING HOURS REPORT")
+    print(f"  {sep}")
+    print(f"   Date   : {today.strftime('%A, %B %d, %Y')}")
+    print(f"   Report : Up to {now_dt.strftime('%I:%M:%S %p')}  (session may still be ongoing)")
+    print(f"  {sep}")
+    print("")
+    print("  Collecting power events...")
+
+    today_events = [e for e in events if e["time"].date() == today]
+    print(f"  Found {len(today_events)} power event(s) for this day.")
+
+    slots_today = day_segments.get(today, [])
+
+    if slots_today:
+        print("")
+        print("   #    Turned ON / Woke Up    Turned OFF / Slept     Duration")
+        print("  " + ("-" * 78))
+
+        total_today_seconds = 0
+        for idx, (start, end) in enumerate(slots_today, 1):
+            slot_seconds = int((end - start).total_seconds())
+            total_today_seconds += slot_seconds
+
+            h = slot_seconds // 3600
+            m = (slot_seconds % 3600) // 60
+            s = slot_seconds % 60
+
+            wake_str = start.strftime('%I:%M:%S %p')
+            is_open_slot = (today == now_dt.date()) and abs((end - now_dt).total_seconds()) < 2
+            if is_open_slot:
+                sleep_str = f"NOW {end.strftime('%I:%M:%S %p')} *"
+            else:
+                sleep_str = end.strftime('%I:%M:%S %p')
+
+            dur_str = f"{h}h {m}m {s}s"
+            print(f"   {idx:<4} {wake_str:<23} {sleep_str:<23} {dur_str}")
+
+        th = total_today_seconds // 3600
+        tm = (total_today_seconds % 3600) // 60
+        ts = total_today_seconds % 60
+
+        print("  " + ("-" * 78))
+        print("")
+        print(f"   TOTAL WORKING TIME   :   {th} hrs  {tm} min  {ts} sec")
     else:
-        print("  (no events)")
-    print(f"{'=' * w}")
+        print("")
+        print(f"  No active working slots found for {today.strftime('%A, %B %d, %Y')}.")
+
+    print(f"  {sep}")
 
 
 if __name__ == "__main__":
