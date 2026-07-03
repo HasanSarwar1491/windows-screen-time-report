@@ -177,8 +177,17 @@ def build_slots_for_day(day, all_events, activity_data, now_dt):
     top_apps = Counter(apps).most_common(5)
     return slots, datetime.timedelta(seconds=system_seconds), datetime.timedelta(seconds=active_seconds), hourly_activity, top_apps
 
+def get_calendar_month_cycle(today):
+    start = today.replace(day=1)
+    if today.month == 12:
+        end = today.replace(year=today.year + 1, month=1, day=1) - datetime.timedelta(days=1)
+    else:
+        end = today.replace(month=today.month + 1, day=1) - datetime.timedelta(days=1)
+    return start, end
+
 def main():
     today = datetime.date.today()
+    cal_start, cal_end = get_calendar_month_cycle(today)
     cur_start, cur_end = get_current_cycle(today)
     prev_start, prev_end = get_previous_cycle(cur_start)
     now_dt = datetime.datetime.now()
@@ -264,6 +273,19 @@ def main():
 
         table.add_row(day.strftime("%a %d %b"), fmt(sys_td), fmt(act_td) if act_td.total_seconds() > 0 else "-", f"[{eff_color}]{eff:.1f}%[/{eff_color}]", bar)
     console.print(table)
+
+    # 6. Monthly Goal Summary
+    t_month, _ = sum_range(daily, cal_start, today)
+    hours_done = t_month.total_seconds() / 3600
+    remaining = 176 - hours_done
+    
+    footer = Table.grid(expand=True)
+    footer.add_column(); footer.add_column(justify="right")
+    footer.add_row(
+        f"[bold cyan]Month-to-Date: {hours_done:.1f}h / 176h[/bold cyan] | [dim]Remaining: {max(0, remaining):.1f}h[/dim]",
+        f"[dim]Logic matched to Teramind thresholds (5m)[/dim]"
+    )
+    console.print(footer)
 
 if __name__ == "__main__":
     main()

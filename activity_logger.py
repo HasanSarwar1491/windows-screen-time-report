@@ -13,7 +13,7 @@ kernel32 = ctypes.windll.kernel32
 
 INPUT_IDLE_MINUTES = 5
 POLL_SECONDS = 60
-RETENTION_DAYS = 60
+RETENTION_DAYS = 400  # Increased to keep over a year of history
 LOG_DIR = os.path.expanduser("~/.screen_time")
 LOG_FILE = os.path.join(LOG_DIR, "activity.log")
 LOCK_FILE = os.path.join(LOG_DIR, "activity_logger.lock")
@@ -60,7 +60,12 @@ def _get_state():
 def _rotate_log():
     if not os.path.exists(LOG_FILE):
         return
-    cutoff = datetime.datetime.now() - datetime.timedelta(days=RETENTION_DAYS)
+    # Archive logic: check if we should archive the previous month
+    now = datetime.datetime.now()
+    first_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    
+    # Simple rotation: just keep RETENTION_DAYS
+    cutoff = now - datetime.timedelta(days=RETENTION_DAYS)
     kept = []
     try:
         with open(LOG_FILE, "r", encoding="utf-8") as f:
@@ -84,7 +89,6 @@ def _append_state(state, app):
     now = datetime.datetime.now().replace(second=0, microsecond=0)
     try:
         with open(LOG_FILE, "a", encoding="utf-8") as f:
-            # Format: ISO_TIMESTAMP,STATE,APP_NAME
             f.write(f"{now.isoformat()},{state},{app}\n")
     except Exception:
         pass
