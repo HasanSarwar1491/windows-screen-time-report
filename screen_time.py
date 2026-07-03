@@ -1,19 +1,22 @@
 import datetime
 import win32evtlog
 import sys
+import os
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
 from rich.text import Text
 from rich import box
+from collections import Counter
 
-# Ensure UTF-8 output for Windows Console to avoid 'charmap' errors with blocks
+# Ensure UTF-8 output
 if sys.stdout.encoding.lower() != 'utf-8':
     import io
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
 REQUIRED_HOURS = 8
 console = Console()
+LOG_FILE = os.path.expanduser("~/.screen_time/activity.log")
 
 def fmt(td):
     total_minutes = int(td.total_seconds() // 60)
@@ -21,27 +24,22 @@ def fmt(td):
     return f"{h}h {m}m"
 
 def pct(actual_td, required_td):
-    if required_td.total_seconds() == 0:
-        return 0.0
+    if required_td.total_seconds() == 0: return 0.0
     return (actual_td.total_seconds() / required_td.total_seconds()) * 100
 
-def is_weekday(d):
-    return d.weekday() < 5
+def is_weekday(d): return d.weekday() < 5
 
 def required_for_day(d):
     return datetime.timedelta(hours=REQUIRED_HOURS) if is_weekday(d) else datetime.timedelta()
 
 def sum_range(daily, start, end):
-    total = datetime.timedelta()
-    required = datetime.timedelta()
+    total, required = datetime.timedelta(), datetime.timedelta()
     d = start
     while d <= end:
-        td = daily.get(d, datetime.timedelta())
-        if td.total_seconds() <= 0:
-            d += datetime.timedelta(days=1)
-            continue
-        total += td
-        required += required_for_day(d)
+        td = daily.get(d, {}).get("system", datetime.timedelta())
+        if td.total_seconds() > 0:
+            total += td
+            required += required_for_day(d)
         d += datetime.timedelta(days=1)
     return total, required
 
@@ -66,23 +64,18 @@ def get_previous_cycle(current_start):
     return start, end
 
 def to_naive(t):
-    if hasattr(t, "tzinfo") and t.tzinfo is not None:
-        t = t.replace(tzinfo=None)
+    if hasattr(t, "tzinfo") and t.tzinfo is not None: t = t.replace(tzinfo=None)
     return datetime.datetime(t.year, t.month, t.day, t.hour, t.minute, t.second)
 
 def _read_log(logname, cutoff, classifier):
     events = []
-    try:
-        hand = win32evtlog.OpenEventLog(None, logname)
-    except Exception:
-        return events
-
+    try: hand = win32evtlog.OpenEventLog(None, logname)
+    except: return events
     flags = win32evtlog.EVENTLOG_BACKWARDS_READ | win32evtlog.EVENTLOG_SEQUENTIAL_READ
     try:
         while True:
             records = win32evtlog.ReadEventLog(hand, flags, 0)
-            if not records:
-                break
+            if not records: break
             hit_cutoff = False
             for rec in records:
                 t = to_naive(rec.TimeGenerated)
@@ -90,53 +83,49 @@ def _read_log(logname, cutoff, classifier):
                     hit_cutoff = True
                     break
                 result = classifier(rec, t)
-                if result:
-                    events.append(result)
-            if hit_cutoff:
-                break
-    finally:
-        win32evtlog.CloseEventLog(hand)
+                if result: events.append(result)
+            if hit_cutoff: break
+    finally: win32evtlog.CloseEventLog(hand)
     return events
 
 def _classify_system(rec, t):
     eid = rec.EventID & 0xFFFF
     src = rec.SourceName.lower()
-
     if "kernel-power" in src:
-        if eid in (42, 506):
-            return {"time": t, "id": eid, "type": "SLEEP", "label": "KernelPower"}
-        if eid in (107, 507):
-            return {"time": t, "id": eid, "type": "WAKE", "label": "KernelPower"}
-
+        if eid in (42, 506): return {"time": t, "id": eid, "type": "SLEEP"}
+        if eid in (107, 507): return {"time": t, "id": eid, "type": "WAKE"}
     if src == "eventlog":
-        if eid == 6005:
-            return {"time": t, "id": eid, "type": "WAKE", "label": "EventLogBoot"}
-        if eid == 6006:
-            return {"time": t, "id": eid, "type": "SLEEP", "label": "EventLogShutdown"}
-
+        if eid == 6005: return {"time": t, "id": eid, "type": "WAKE"}
+        if eid == 6006: return {"time": t, "id": eid, "type": "SLEEP"}
     return None
 
-def collect_power_events(start_dt, end_dt):
-    events = _read_log("System", start_dt, _classify_system)
-    events = [e for e in events if start_dt <= e["time"] <= end_dt]
-    events.sort(key=lambda x: x["time"])
-    return events
+def load_activity_logs():
+    activity = {} # date -> {minute_timestamp -> (state, app)}
+    if not os.path.exists(LOG_FILE): return activity
+    try:
+        with open(LOG_FILE, "r") as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) < 2: continue
+                dt = datetime.datetime.fromisoformat(parts[0])
+                d = dt.date()
+                if d not in activity: activity[d] = {}
+                state = parts[1]
+                app = parts[2] if len(parts) > 2 else "Unknown"
+                activity[d][dt.replace(second=0, microsecond=0)] = (state, app)
+    except: pass
+    return activity
 
-def build_slots_for_day(day, all_events, now_dt):
+def build_slots_for_day(day, all_events, activity_data, now_dt):
     day_start = datetime.datetime.combine(day, datetime.time.min)
     next_midnight = day_start + datetime.timedelta(days=1)
     day_end = min(next_midnight, now_dt) if day == now_dt.date() else next_midnight
 
-    if day_end <= day_start:
-        return []
-
+    lookback_events = [e for e in all_events if (day_start - datetime.timedelta(hours=2)) <= e["time"] < day_start]
+    system_on_at_midnight = bool(lookback_events and lookback_events[-1]["type"] == "WAKE")
+    
     today_events = [e for e in all_events if day_start <= e["time"] <= day_end]
-
-    lookback_start = day_start - datetime.timedelta(hours=2)
-    lookback_events = [e for e in all_events if lookback_start <= e["time"] < day_start]
-    last_pre_event = lookback_events[-1] if lookback_events else None
-    system_on_at_midnight = bool(last_pre_event and last_pre_event["type"] == "WAKE")
-
+    
     processed = []
     for idx, event in enumerate(today_events):
         is_shutdown_artifact_wake = (
@@ -160,41 +149,33 @@ def build_slots_for_day(day, all_events, now_dt):
     wake_time = day_start if system_on_at_midnight else None
 
     for event in processed:
-        if event["type"] == "WAKE" and wake_time is None:
-            wake_time = event["time"]
+        if event["type"] == "WAKE" and wake_time is None: wake_time = event["time"]
         elif event["type"] == "SLEEP" and wake_time is not None:
-            duration = (event["time"] - wake_time).total_seconds()
-            if duration > 5:
+            if (event["time"] - wake_time).total_seconds() > 5:
                 slots.append((wake_time, event["time"]))
             wake_time = None
+    if wake_time is not None: slots.append((wake_time, day_end))
 
-    if wake_time is not None:
-        duration = (day_end - wake_time).total_seconds()
-        if duration > 5:
-            slots.append((wake_time, day_end))
-
-    return slots
-
-def build_daily_summary(start_day, end_day, all_events, now_dt):
-    daily = {}
-    day_segments = {}
-    all_slots = []
-    day = start_day
-    while day <= end_day:
-        slots = build_slots_for_day(day, all_events, now_dt)
-        if slots:
-            total_seconds = sum((end - start).total_seconds() for start, end in slots)
-            daily[day] = datetime.timedelta(seconds=total_seconds)
-            day_segments[day] = slots
-            all_slots.extend(slots)
-        day += datetime.timedelta(days=1)
-    return daily, day_segments, all_slots
-
-def get_status_color(percentage):
-    if percentage >= 100: return "green"
-    if percentage >= 80: return "yellow"
-    if percentage > 0: return "red"
-    return "white"
+    system_seconds = sum((e-s).total_seconds() for s, e in slots)
+    
+    active_seconds = 0
+    hourly_activity = [0] * 24
+    apps = []
+    if day in activity_data:
+        day_activity = activity_data[day]
+        for start, end in slots:
+            curr = start.replace(second=0, microsecond=0)
+            while curr <= end:
+                entry = day_activity.get(curr)
+                if entry and entry[0] == "active": 
+                    active_seconds += 60
+                    hourly_activity[curr.hour] += 1
+                    apps.append(entry[1])
+                curr += datetime.timedelta(minutes=1)
+    
+    active_seconds = min(active_seconds, system_seconds)
+    top_apps = Counter(apps).most_common(5)
+    return slots, datetime.timedelta(seconds=system_seconds), datetime.timedelta(seconds=active_seconds), hourly_activity, top_apps
 
 def main():
     today = datetime.date.today()
@@ -202,105 +183,87 @@ def main():
     prev_start, prev_end = get_previous_cycle(cur_start)
     now_dt = datetime.datetime.now()
     
-    with console.status("[bold blue]Analyzing Windows Event Logs...", spinner="dots"):
-        first_needed_day = prev_start
-        system_read_start = datetime.datetime.combine(first_needed_day, datetime.time.min) - datetime.timedelta(hours=2)
-        system_read_end = now_dt
-        events = collect_power_events(system_read_start, system_read_end)
-        daily, day_segments, sessions = build_daily_summary(prev_start, today, events, now_dt)
+    with console.status("[bold blue]Generating High-Fidelity Teramind Report...", spinner="dots"):
+        events = _read_log("System", datetime.datetime.combine(prev_start, datetime.time.min), _classify_system)
+        events.sort(key=lambda x: x["time"])
+        activity_data = load_activity_logs()
+        
+        daily = {}
+        day = prev_start
+        while day <= today:
+            slots, sys_td, act_td, hourly, top_apps = build_slots_for_day(day, events, activity_data, now_dt)
+            if sys_td.total_seconds() > 0:
+                daily[day] = {"system": sys_td, "active": act_td, "slots": slots, "hourly": hourly, "apps": top_apps}
+            day += datetime.timedelta(days=1)
 
     # 1. Header
-    console.print(Panel(
-        Text.assemble(
-            ("WINDOWS SCREEN TIME REPORT\n", "bold cyan"),
-            (f"Target: {REQUIRED_HOURS}h/day (Weekdays) | Generated: {now_dt.strftime('%Y-%m-%d %H:%M:%S')}", "dim")
-        ),
-        box=box.DOUBLE,
-        border_style="blue"
-    ))
+    console.print(Panel(Text.assemble(
+        ("TERAMIND HIGH-FIDELITY DASHBOARD\n", "bold green"),
+        (f"Focused Window Tracking & Productivity Score | {now_dt.strftime('%H:%M:%S')}", "dim")
+    ), box=box.DOUBLE, border_style="green"))
 
-    # 2. Daily Log Table
-    table = Table(title="Activity History (Last 30 Days)", box=box.ROUNDED, expand=True)
-    table.add_column("Date", style="cyan", no_wrap=True)
-    table.add_column("Time Active", justify="right")
-    table.add_column("Progress Bar", ratio=1)
-    table.add_column("Goal %", justify="right")
-    table.add_column("Sessions", style="dim")
+    # 2. Key Stats Panel
+    today_data = daily.get(today, {"system": datetime.timedelta(), "active": datetime.timedelta(), "hourly": [0]*24, "apps": []})
+    today_sys, today_act = today_data["system"], today_data["active"]
+    score = (today_act.total_seconds() / today_sys.total_seconds() * 100) if today_sys.total_seconds() > 0 else 0
+    score_color = "green" if score > 75 else "yellow" if score > 50 else "red"
+
+    stats_row = Table.grid(expand=True, padding=1)
+    stats_row.add_column(ratio=1); stats_row.add_column(ratio=1); stats_row.add_column(ratio=1)
+    stats_row.add_row(
+        Panel(f"[bold]{fmt(today_act)}[/bold]\n[dim]Productive Time[/dim]", border_style="green", title="Focused Active"),
+        Panel(f"[bold]{score:.1f}%[/bold]\n[dim]Intensity Score[/dim]", border_style=score_color, title="Accountability"),
+        Panel(f"[bold]{fmt(today_sys - today_act)}[/bold]\n[dim]Idle/Background[/dim]", border_style="red", title="Unaccounted")
+    )
+    console.print(stats_row)
+
+    # 3. Top Focused Applications (Teramind Feature)
+    if today_data["apps"]:
+        app_table = Table(title="Top Focused Applications (Today)", box=box.SIMPLE, expand=True)
+        app_table.add_column("Application Name", style="cyan")
+        app_table.add_column("Active Minutes", justify="right", style="green")
+        app_table.add_column("Share", justify="right")
+        
+        total_m = sum(count for _, count in today_data["apps"])
+        for app, count in today_data["apps"]:
+            app_table.add_row(app, f"{count}m", f"{(count/total_m*100):.1f}%")
+        console.print(Panel(app_table, border_style="blue"))
+
+    # 4. Hourly Intensity Map
+    heatmap = Text("Work Intensity Map: ", style="bold")
+    for h in range(24):
+        intensity = today_data["hourly"][h]
+        char = "█" if intensity > 45 else "▓" if intensity > 30 else "▒" if intensity > 10 else "░" if intensity > 0 else " "
+        color = "green" if intensity > 30 else "yellow" if intensity > 10 else "dim"
+        heatmap.append(f" {h:02d}", style="dim")
+        heatmap.append(char, style=color)
+    console.print(Panel(heatmap, title="Hourly Activity Timeline", border_style="dim"))
+
+    # 5. Historical Log
+    table = Table(title="Historical Accountability (Last 30 Days)", box=box.ROUNDED, expand=True)
+    table.add_column("Date", style="cyan")
+    table.add_column("System", justify="right")
+    table.add_column("Focused", style="green", justify="right")
+    table.add_column("Score", justify="right")
+    table.add_column("Intensity Bar", ratio=1)
 
     for i in range(29, -1, -1):
         day = today - datetime.timedelta(days=i)
-        td = daily.get(day, datetime.timedelta())
-        segs = day_segments.get(day, [])
-        has_activity = day in daily and td.total_seconds() > 0
+        if day not in daily and not is_weekday(day): continue
+        data = daily.get(day, {"system": datetime.timedelta(), "active": datetime.timedelta(), "slots": []})
+        sys_td, act_td = data["system"], data["active"]
+        if sys_td.total_seconds() == 0 and day != today: continue
 
-        if not has_activity and not is_weekday(day): continue
-        if not has_activity and day != today: continue
-
-        label = day.strftime("%a %d %b")
-        if day == today: label = f"[bold yellow]{label} (Today)[/bold yellow]"
+        eff = (act_td.total_seconds() / sys_td.total_seconds() * 100) if sys_td.total_seconds() > 0 else 0
+        eff_color = "green" if eff > 75 else "yellow" if eff > 40 else "dim"
         
-        req = required_for_day(day)
-        p = pct(td, req) if is_weekday(day) else (100.0 if has_activity else 0.0)
-        color = get_status_color(p) if is_weekday(day) else "blue"
-        
-        # Simple ASCII Bar for legacy compatibility if UTF blocks fail, 
-        # but here we use the characters that usually work in modern terminals
-        progress_val = min(p, 100)
-        bar_count = int(progress_val / 5)
-        bar = "#" * bar_count + "." * (20 - bar_count)
-        bar_display = f"[{color}][{bar}][/{color}]"
+        bar_width = 15
+        act_bars = int((act_td.total_seconds() / (REQUIRED_HOURS*3600)) * bar_width) if is_weekday(day) else int(bar_width/2)
+        sys_bars = int((sys_td.total_seconds() / (REQUIRED_HOURS*3600)) * bar_width) if is_weekday(day) else int(bar_width/2)
+        bar = "[green]" + "█" * act_bars + "[/green]" + "░" * max(0, sys_bars - act_bars) + " " * max(0, bar_width - sys_bars)
 
-        session_str = f"{segs[0][0].strftime('%H:%M')}-{segs[-1][1].strftime('%H:%M')}" if segs else "-"
-        
-        table.add_row(
-            label,
-            fmt(td),
-            bar_display,
-            f"[{color}]{p:5.1f}%[/{color}]" if is_weekday(day) else "[blue]w/e[/blue]",
-            session_str
-        )
-
+        table.add_row(day.strftime("%a %d %b"), fmt(sys_td), fmt(act_td) if act_td.total_seconds() > 0 else "-", f"[{eff_color}]{eff:.1f}%[/{eff_color}]", bar)
     console.print(table)
-
-    # 3. Summary Cards
-    summary_table = Table.grid(expand=True, padding=1)
-    summary_table.add_column(ratio=1)
-    summary_table.add_column(ratio=1)
-    summary_table.add_column(ratio=1)
-
-    t7, r7 = sum_range(daily, today - datetime.timedelta(days=6), today)
-    t30, r30 = sum_range(daily, today - datetime.timedelta(days=29), today)
-    tc, rc = sum_range(daily, cur_start, today)
-
-    summary_table.add_row(
-        Panel(f"[bold]{fmt(t7)}[/bold]\n[dim]Last 7 Days[/dim]", border_style="cyan", title="7D Avg"),
-        Panel(f"[bold]{fmt(t30)}[/bold]\n[dim]Last 30 Days[/dim]", border_style="magenta", title="30D Total"),
-        Panel(f"[bold]{fmt(tc)}[/bold]\n[dim]{pct(tc, rc):.1f}% of target[/dim]", border_style="green", title="Current Cycle")
-    )
-    console.print(summary_table)
-
-    # 4. Today's Detail
-    slots_today = day_segments.get(today, [])
-    if slots_today:
-        detail_table = Table(title=f"Today's Session Breakdown ({today.strftime('%A')})", box=box.SIMPLE_HEAD)
-        detail_table.add_column("#", style="dim")
-        detail_table.add_column("Start Time", style="green")
-        detail_table.add_column("End Time", style="red")
-        detail_table.add_column("Duration", justify="right")
-
-        for idx, (start, end) in enumerate(slots_today, 1):
-            slot_seconds = int((end - start).total_seconds())
-            h, m, s = slot_seconds // 3600, (slot_seconds % 3600) // 60, slot_seconds % 60
-            
-            is_open = (today == now_dt.date()) and abs((end - now_dt).total_seconds()) < 5
-            end_str = f"[bold]ACTIVE[/bold]" if is_open else end.strftime('%I:%M:%S %p')
-            
-            detail_table.add_row(str(idx), start.strftime('%I:%M:%S %p'), end_str, f"{h}h {m}m {s}s")
-        
-        console.print(Panel(detail_table, border_style="yellow"))
-    
-    # 5. Footer
-    console.print(f"[dim]Stats: {len(events)} events processed across {len(sessions)} power slots. System uses Modern Standby (ID 506/507).[/dim]", justify="right")
 
 if __name__ == "__main__":
     main()

@@ -3,32 +3,31 @@ import datetime
 import os
 import signal
 import time
+import sys
+import msvcrt
+import psutil
 
+# Windows API for getting foreground window
+user32 = ctypes.windll.user32
+kernel32 = ctypes.windll.kernel32
 
 INPUT_IDLE_MINUTES = 5
 POLL_SECONDS = 60
 RETENTION_DAYS = 60
 LOG_DIR = os.path.expanduser("~/.screen_time")
 LOG_FILE = os.path.join(LOG_DIR, "activity.log")
-
+LOCK_FILE = os.path.join(LOG_DIR, "activity_logger.lock")
 
 class LASTINPUTINFO(ctypes.Structure):
     _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint)]
 
-
-user32 = ctypes.windll.user32
-kernel32 = ctypes.windll.kernel32
-
-
 def _ensure_log_dir():
     os.makedirs(LOG_DIR, exist_ok=True)
-
 
 def _current_tick_ms():
     if hasattr(kernel32, "GetTickCount64"):
         return int(kernel32.GetTickCount64())
     return int(kernel32.GetTickCount())
-
 
 def _seconds_since_last_input():
     info = LASTINPUTINFO()
@@ -40,43 +39,55 @@ def _seconds_since_last_input():
         elapsed_ms = 0
     return elapsed_ms / 1000.0
 
+def get_foreground_app_name():
+    try:
+        hwnd = user32.GetForegroundWindow()
+        _, pid = ctypes.wintypes.DWORD(), ctypes.wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        process = psutil.Process(pid.value)
+        return process.name()
+    except Exception:
+        return "Unknown"
 
 def _get_state():
     seconds = _seconds_since_last_input()
     if seconds is None:
-        return "active"
-    return "idle" if seconds >= INPUT_IDLE_MINUTES * 60 else "active"
-
+        return "active", "Unknown"
+    state = "idle" if seconds >= INPUT_IDLE_MINUTES * 60 else "active"
+    app = get_foreground_app_name() if state == "active" else "None"
+    return state, app
 
 def _rotate_log():
     if not os.path.exists(LOG_FILE):
         return
     cutoff = datetime.datetime.now() - datetime.timedelta(days=RETENTION_DAYS)
     kept = []
-    with open(LOG_FILE, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            parts = line.split(",", 1)
-            if len(parts) != 2:
-                continue
-            try:
-                ts = datetime.datetime.fromisoformat(parts[0])
-            except ValueError:
-                continue
-            if ts >= cutoff:
-                kept.append(line)
-    with open(LOG_FILE, "w", encoding="utf-8") as f:
-        for line in kept:
-            f.write(line + "\n")
+    try:
+        with open(LOG_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line: continue
+                parts = line.split(",", 2)
+                if len(parts) < 2: continue
+                try:
+                    ts = datetime.datetime.fromisoformat(parts[0])
+                except ValueError: continue
+                if ts >= cutoff:
+                    kept.append(line)
+        with open(LOG_FILE, "w", encoding="utf-8") as f:
+            for line in kept:
+                f.write(line + "\n")
+    except Exception:
+        pass
 
-
-def _append_state(state):
+def _append_state(state, app):
     now = datetime.datetime.now().replace(second=0, microsecond=0)
-    with open(LOG_FILE, "a", encoding="utf-8") as f:
-        f.write(f"{now.isoformat()},{state}\n")
-
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            # Format: ISO_TIMESTAMP,STATE,APP_NAME
+            f.write(f"{now.isoformat()},{state},{app}\n")
+    except Exception:
+        pass
 
 def _sleep_to_next_tick():
     now = time.time()
@@ -86,8 +97,15 @@ def _sleep_to_next_tick():
         sleep_for = POLL_SECONDS
     time.sleep(sleep_for)
 
-
 def main():
+    _ensure_log_dir()
+    
+    lock_file_handle = open(LOCK_FILE, 'w')
+    try:
+        msvcrt.locking(lock_file_handle.fileno(), msvcrt.LK_NBLCK, 1)
+    except OSError:
+        sys.exit(0)
+
     should_run = {"value": True}
 
     def _stop_handler(_signum, _frame):
@@ -97,13 +115,18 @@ def main():
     if hasattr(signal, "SIGTERM"):
         signal.signal(signal.SIGTERM, _stop_handler)
 
-    _ensure_log_dir()
     _rotate_log()
 
     while should_run["value"]:
-        _append_state(_get_state())
+        state, app = _get_state()
+        _append_state(state, app)
         _sleep_to_next_tick()
-
+    
+    lock_file_handle.close()
+    try:
+        os.remove(LOCK_FILE)
+    except:
+        pass
 
 if __name__ == "__main__":
     main()
