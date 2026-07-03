@@ -8,6 +8,8 @@ from rich.panel import Panel
 from rich.text import Text
 from rich import box
 from collections import Counter
+from rich.progress import ProgressBar
+from rich.columns import Columns
 
 # Ensure UTF-8 output
 if sys.stdout.encoding.lower() != 'utf-8':
@@ -15,6 +17,7 @@ if sys.stdout.encoding.lower() != 'utf-8':
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
 REQUIRED_HOURS = 8
+MONTHLY_TARGET = 176
 console = Console()
 LOG_FILE = os.path.expanduser("~/.screen_time/activity.log")
 
@@ -192,7 +195,7 @@ def main():
     prev_start, prev_end = get_previous_cycle(cur_start)
     now_dt = datetime.datetime.now()
     
-    with console.status("[bold blue]Generating High-Fidelity Teramind Report...", spinner="dots"):
+    with console.status("[bold blue]Generating Teramind-Style Accountability Report...", spinner="dots"):
         events = _read_log("System", datetime.datetime.combine(prev_start, datetime.time.min), _classify_system)
         events.sort(key=lambda x: x["time"])
         activity_data = load_activity_logs()
@@ -211,50 +214,71 @@ def main():
         (f"Focused Window Tracking & Productivity Score | {now_dt.strftime('%H:%M:%S')}", "dim")
     ), box=box.DOUBLE, border_style="green"))
 
-    # 2. Key Stats Panel
+    # 2. Key Productivity Stats (Today)
     today_data = daily.get(today, {"system": datetime.timedelta(), "active": datetime.timedelta(), "hourly": [0]*24, "apps": []})
     today_sys, today_act = today_data["system"], today_data["active"]
     score = (today_act.total_seconds() / today_sys.total_seconds() * 100) if today_sys.total_seconds() > 0 else 0
-    score_color = "green" if score > 75 else "yellow" if score > 50 else "red"
+    score_color = "bright_green" if score > 75 else "yellow" if score > 50 else "red"
+    
+    # Progress towards daily goal
+    daily_prog = min(pct(today_act, datetime.timedelta(hours=REQUIRED_HOURS)), 100)
+    daily_color = "bright_green" if daily_prog >= 100 else "cyan"
 
     stats_row = Table.grid(expand=True, padding=1)
     stats_row.add_column(ratio=1); stats_row.add_column(ratio=1); stats_row.add_column(ratio=1)
     stats_row.add_row(
-        Panel(f"[bold]{fmt(today_act)}[/bold]\n[dim]Productive Time[/dim]", border_style="green", title="Focused Active"),
-        Panel(f"[bold]{score:.1f}%[/bold]\n[dim]Intensity Score[/dim]", border_style=score_color, title="Accountability"),
-        Panel(f"[bold]{fmt(today_sys - today_act)}[/bold]\n[dim]Idle/Background[/dim]", border_style="red", title="Unaccounted")
+        Panel(f"[bold {daily_color}]{fmt(today_act)}[/bold {daily_color}]\n[dim]Daily Active ({daily_prog:.0f}%)[/dim]", border_style=daily_color, title="Today's Productivity"),
+        Panel(f"[bold {score_color}]{score:.1f}%[/bold {score_color}]\n[dim]Accountability Score[/dim]", border_style=score_color, title="Efficiency"),
+        Panel(f"[bold red]{fmt(today_sys - today_act)}[/bold red]\n[dim]Idle/Background[/dim]", border_style="red", title="Unaccounted")
     )
     console.print(stats_row)
 
-    # 3. Top Focused Applications (Teramind Feature)
+    # 3. Monthly Goal (The 176h Target)
+    t_month, _ = sum_range(daily, cal_start, today)
+    hours_done = t_month.total_seconds() / 3600
+    month_pct = min((hours_done / MONTHLY_TARGET) * 100, 100)
+    month_color = "bright_green" if month_pct >= 100 else "bright_blue"
+    
+    month_progress = ProgressBar(total=MONTHLY_TARGET, completed=hours_done, width=None, finished_style="bright_green")
+    console.print(Panel(
+        Columns([
+            f"[bold {month_color}]Month-to-Date: {hours_done:.1f}h / {MONTHLY_TARGET}h ({month_pct:.1f}%)[/bold {month_color}]",
+            month_progress,
+            f"[dim]Remaining: {max(0, MONTHLY_TARGET - hours_done):.1f}h[/dim]"
+        ], expand=True, align="left"),
+        title="Monthly Target Tracker", border_style=month_color
+    ))
+
+    # 4. Top Focused Applications (Today)
     if today_data["apps"]:
-        app_table = Table(title="Top Focused Applications (Today)", box=box.SIMPLE, expand=True)
+        app_table = Table(box=box.SIMPLE, expand=True)
         app_table.add_column("Application Name", style="cyan")
         app_table.add_column("Active Minutes", justify="right", style="green")
-        app_table.add_column("Share", justify="right")
+        app_table.add_column("Focus Share", justify="right")
         
         total_m = sum(count for _, count in today_data["apps"])
         for app, count in today_data["apps"]:
             app_table.add_row(app, f"{count}m", f"{(count/total_m*100):.1f}%")
-        console.print(Panel(app_table, border_style="blue"))
+        console.print(Panel(app_table, title="Application Focus Distribution", border_style="dim"))
 
-    # 4. Hourly Intensity Map
-    heatmap = Text("Work Intensity Map: ", style="bold")
+    # 5. Hourly Intensity Map (Timeline)
+    heatmap = Text("Intensity: ", style="bold")
     for h in range(24):
         intensity = today_data["hourly"][h]
-        char = "█" if intensity > 45 else "▓" if intensity > 30 else "▒" if intensity > 10 else "░" if intensity > 0 else " "
-        color = "green" if intensity > 30 else "yellow" if intensity > 10 else "dim"
+        # Modern block characters
+        char = "█" if intensity > 45 else "▆" if intensity > 30 else "▄" if intensity > 10 else "▂" if intensity > 0 else " "
+        color = "bright_green" if intensity > 30 else "yellow" if intensity > 10 else "dim"
         heatmap.append(f" {h:02d}", style="dim")
         heatmap.append(char, style=color)
-    console.print(Panel(heatmap, title="Hourly Activity Timeline", border_style="dim"))
+    console.print(Panel(heatmap, title="Hourly Work Timeline", border_style="dim"))
 
-    # 5. Historical Log
+    # 6. Historical Accountability Table
     table = Table(title="Historical Accountability (Last 30 Days)", box=box.ROUNDED, expand=True)
-    table.add_column("Date", style="cyan")
-    table.add_column("System", justify="right")
-    table.add_column("Focused", style="green", justify="right")
-    table.add_column("Score", justify="right")
-    table.add_column("Intensity Bar", ratio=1)
+    table.add_column("Date", style="cyan", no_wrap=True)
+    table.add_column("System On", justify="right")
+    table.add_column("Focused", style="bright_green", justify="right")
+    table.add_column("Efficiency", justify="right")
+    table.add_column("Activity Intensity", ratio=1)
 
     for i in range(29, -1, -1):
         day = today - datetime.timedelta(days=i)
@@ -264,28 +288,28 @@ def main():
         if sys_td.total_seconds() == 0 and day != today: continue
 
         eff = (act_td.total_seconds() / sys_td.total_seconds() * 100) if sys_td.total_seconds() > 0 else 0
-        eff_color = "green" if eff > 75 else "yellow" if eff > 40 else "dim"
+        eff_color = "bright_green" if eff > 75 else "yellow" if eff > 40 else "dim"
         
-        bar_width = 15
+        # Color coding for target hours
+        sys_color = "bright_green" if sys_td >= datetime.timedelta(hours=REQUIRED_HOURS) else "white"
+        
+        # Visual intensity bar
+        bar_width = 20
+        # Active (Green) within System (Grey)
         act_bars = int((act_td.total_seconds() / (REQUIRED_HOURS*3600)) * bar_width) if is_weekday(day) else int(bar_width/2)
         sys_bars = int((sys_td.total_seconds() / (REQUIRED_HOURS*3600)) * bar_width) if is_weekday(day) else int(bar_width/2)
-        bar = "[green]" + "█" * act_bars + "[/green]" + "░" * max(0, sys_bars - act_bars) + " " * max(0, bar_width - sys_bars)
+        
+        intensity_bar = "[bright_green]" + "█" * act_bars + "[/bright_green]" + "░" * max(0, sys_bars - act_bars) + " " * max(0, bar_width - sys_bars)
 
-        table.add_row(day.strftime("%a %d %b"), fmt(sys_td), fmt(act_td) if act_td.total_seconds() > 0 else "-", f"[{eff_color}]{eff:.1f}%[/{eff_color}]", bar)
+        table.add_row(
+            day.strftime("%a %d %b"), 
+            f"[{sys_color}]{fmt(sys_td)}[/{sys_color}]", 
+            fmt(act_td) if act_td.total_seconds() > 0 else "-", 
+            f"[{eff_color}]{eff:.1f}%[/{eff_color}]", 
+            intensity_bar
+        )
     console.print(table)
-
-    # 6. Monthly Goal Summary
-    t_month, _ = sum_range(daily, cal_start, today)
-    hours_done = t_month.total_seconds() / 3600
-    remaining = 176 - hours_done
-    
-    footer = Table.grid(expand=True)
-    footer.add_column(); footer.add_column(justify="right")
-    footer.add_row(
-        f"[bold cyan]Month-to-Date: {hours_done:.1f}h / 176h[/bold cyan] | [dim]Remaining: {max(0, remaining):.1f}h[/dim]",
-        f"[dim]Logic matched to Teramind thresholds (5m)[/dim]"
-    )
-    console.print(footer)
+    console.print(f"[dim]Tracking logic optimized for Modern Standby and matched to Teramind thresholds (5m idle).[/dim]", justify="right")
 
 if __name__ == "__main__":
     main()
