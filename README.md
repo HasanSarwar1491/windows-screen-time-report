@@ -1,53 +1,45 @@
-# screen-time-report
+# Windows Accountability Tracker
 
-Windows screen-time reporting using System Event Log power events.
+Windows screen-time tracking and Teramind-style accountability monitoring.
 
-The report includes:
-- Daily screen-on totals for the last 30 days
-- Session segments per day
-- 7-day, 30-day, and cycle summaries against an 8-hour weekday target
-- A detailed daily working-hours table for today
+## 🚀 Quick Setup
 
-## Files
+If you are a new user, simply run the setup script:
 
-- `screen_time.py` - main report script
-- `activity_logger.py` - optional local input-state logger utility
-- `install_task.py` - optional scheduler helper for `activity_logger.py`
-
-## Requirements
-
-- Windows 10/11
-- Python 3.8+
-- `pywin32`
-
-Install dependency:
-
-```bash
-pip install pywin32
+```powershell
+./setup.bat
 ```
 
-## Run
+This will:
+1. Install all dependencies (`pywin32`, `rich`, `psutil`).
+2. Configure the **Background Activity Logger** to start automatically with Windows.
+3. Launch the logger silently.
+4. Generate your first report.
 
+---
+
+## 📊 How to Use
+
+### 1. View Dashboard
+To see your productivity dashboard anytime, run:
 ```bash
 python screen_time.py
 ```
 
-## Optional utilities
+### 2. Best Practices for Accountability
+* **Hibernate over Sleep:** When finishing work, use **Hibernate**. This ensures the "System On" clock stops exactly when you do.
+* **Focused Window Rule:** The tracker logs the application you are actually interacting with. Use this to prove your focus even if background apps (like YouTube or Spotify) are running.
 
-If you want to run the activity logger in the background at logon:
+## 🛠️ Components
 
-```bash
-python install_task.py
-```
+- `screen_time.py` - Main dashboard (Accountability scores, Heatmap, Session lists).
+- `activity_logger.py` - Background agent that monitors active windows and input.
+- `setup.bat` - One-click installer and configuration tool.
 
-To remove that scheduled task:
+---
 
-```bash
-python install_task.py --uninstall
-```
+## 📝 Requirements
 
-## Notes
-
-- Core reporting is based on Event Log power events.
-- The script applies event cleanup rules to avoid counting transient wake artifacts.
-- Billing cycle is 16th to 15th.
+- Windows 10/11
+- Python 3.8+
+- Admin rights (for initial dependency installation via pip)
