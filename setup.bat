@@ -2,7 +2,7 @@
 setlocal enabledelayedexpansion
 
 echo =======================================================
-echo   Windows Accountability Tracker - Setup & Restart
+echo   Windows Accountability Tracker - Setup ^& Restart
 echo =======================================================
 echo.
 
@@ -56,7 +56,7 @@ echo [OK] Using PythonW at: %PYTHONW_EXE%
 
 (
 echo Set WshShell = CreateObject^("WScript.Shell"^)
-echo WshShell.Run "%PYTHONW_EXE% %LOGGER_PATH%", 0, False
+echo WshShell.Run """%PYTHONW_EXE%"" ""%LOGGER_PATH%""", 0, False
 ) > "%VBS_SCRIPT%"
 
 echo [OK] Startup script created at: %VBS_SCRIPT%
@@ -78,7 +78,7 @@ python "%~dp0screen_time.py"
 
 echo.
 echo =======================================================
-echo   SETUP & RESTART COMPLETE! 
+echo   SETUP ^& RESTART COMPLETE! 
 echo =======================================================
 echo.
 echo  * The tracker will now start automatically when you log in.

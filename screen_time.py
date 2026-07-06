@@ -12,7 +12,8 @@ from rich.progress import ProgressBar
 from rich.columns import Columns
 
 # Ensure UTF-8 output
-if sys.stdout.encoding.lower() != 'utf-8':
+_stdout_encoding = (sys.stdout.encoding or '').lower()
+if _stdout_encoding != 'utf-8':
     import io
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
