@@ -1,53 +1,54 @@
-# screen-time-report
+# Windows Accountability Tracker
 
-Windows screen-time reporting using System Event Log power events.
+Windows screen-time tracking and Teramind-style accountability monitoring.
 
-The report includes:
-- Daily screen-on totals for the last 30 days
-- Session segments per day
-- 7-day, 30-day, and cycle summaries against an 8-hour weekday target
-- A detailed daily working-hours table for today
+## 🚀 Quick Setup
 
-## Files
+If you are a new user, simply run the setup script:
 
-- `screen_time.py` - main report script
-- `activity_logger.py` - optional local input-state logger utility
-- `install_task.py` - optional scheduler helper for `activity_logger.py`
-
-## Requirements
-
-- Windows 10/11
-- Python 3.8+
-- `pywin32`
-
-Install dependency:
-
-```bash
-pip install pywin32
+```powershell
+./setup.bat
 ```
 
-## Run
+This will:
+1. Install all dependencies (`pywin32`, `rich`, `psutil`).
+2. Configure the **Background Activity Logger** to start automatically with Windows.
+3. Launch the logger silently.
+4. Generate your first report.
 
-```bash
-python screen_time.py
-```
+---
 
-## Optional utilities
+## 📊 Understanding the Metrics
 
-If you want to run the activity logger in the background at logon:
+### 1. System On (Total Time)
+Total duration your computer was "awake" or the screen was active. (Includes Windows maintenance wakes).
 
-```bash
-python install_task.py
-```
+### 2. Focused Active Time
+Minutes where **keyboard/mouse input** was detected AND a **specific application was in focus**. 
 
-To remove that scheduled task:
+### 3. Accountability Score (Efficiency)
+Calculated as: `(Focused Active Time / System On Time) * 100`.
+*   **75%+ (Green):** High intensity.
+*   **40%-74% (Yellow):** Moderate activity / frequent breaks.
+*   **<40% (Red):** Low activity / PC left idle.
 
-```bash
-python install_task.py --uninstall
-```
+### 4. Work Intensity Map (Heatmap)
+A 24-hour visual timeline. Dark blocks (█) mean constant activity.
 
-## Notes
+### 5. Top Focused Applications
+Lists apps that were "on top" and actively used. Useful for proving work focus.
 
-- Core reporting is based on Event Log power events.
-- The script applies event cleanup rules to avoid counting transient wake artifacts.
-- Billing cycle is 16th to 15th.
+### 6. Monthly Goal (176h Target)
+Specifically for monthly hour requirements. Shows **Month-to-Date** totals and **Remaining** hours left in the month.
+
+---
+
+## 📅 Best Practices for 176h/Month
+*   **Hibernate over Sleep:** Use **Hibernate** at the end of the day. It stops all timers instantly and prevents "ghost" wakes at night.
+*   **The 5-Minute Rule:** If you are idle for 5 minutes, the active clock stops. Stay active in your focused window to keep your score high.
+*   **Retention:** Logs are kept for **400 days** by default to ensure you can track your history across years.
+
+---
+
+## 📝 Requirements
+- Windows 10/11 | Python 3.8+ | Admin rights (for pip)

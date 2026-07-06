@@ -1,0 +1,27 @@
+{
+    "productive_apps": [
+        "Zed.exe",
+        "Cursor.exe",
+        "Code.exe",
+        "ms-teams.exe",
+        "WindowsTerminal.exe",
+        "Goose.exe",
+        "cmd.exe",
+        "powershell.exe",
+        "git.exe"
+    ],
+    "distraction_apps": [
+        "YouTube",
+        "Facebook",
+        "Twitter",
+        "Netflix",
+        "Spotify.exe"
+    ],
+    "meeting_apps": [
+        "ms-teams.exe",
+        "Zoom.exe",
+        "Webex.exe"
+    ],
+    "idle_threshold_minutes": 5,
+    "meeting_idle_threshold_minutes": 20
+}
