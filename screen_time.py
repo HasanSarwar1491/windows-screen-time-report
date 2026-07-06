@@ -18,23 +18,17 @@ if sys.stdout.encoding.lower() != 'utf-8':
 
 REQUIRED_HOURS = 8
 MONTHLY_TARGET = 176
-SLOT_MINUTES = 10  # For the discrete view
+SLOT_MINUTES = 10 
 SLOT_THRESHOLD_MINUTES = 2 
-ULTRA_REALISTIC_PRECISION = 1 # 1-minute precision for final totals
 console = Console()
 LOG_FILE = os.path.expanduser("~/.screen_time/activity.log")
 
 def fmt(td):
-    if isinstance(td, (int, float)): # minutes
-        h, m = divmod(int(td), 60)
-    else: # timedelta
+    if isinstance(td, (int, float)): h, m = divmod(int(td), 60)
+    else:
         total_minutes = int(td.total_seconds() // 60)
         h, m = divmod(total_minutes, 60)
     return f"{h}h {m}m"
-
-def pct(actual_td, required_td):
-    if required_td.total_seconds() == 0: return 0.0
-    return (actual_td.total_seconds() / required_td.total_seconds()) * 100
 
 def is_weekday(d): return d.weekday() < 5
 
@@ -54,9 +48,7 @@ def _read_log(logname, cutoff, classifier):
             hit_cutoff = False
             for rec in records:
                 t = to_naive(rec.TimeGenerated)
-                if t < cutoff:
-                    hit_cutoff = True
-                    break
+                if t < cutoff: hit_cutoff = True; break
                 result = classifier(rec, t)
                 if result: events.append(result)
             if hit_cutoff: break
@@ -75,7 +67,7 @@ def _classify_system(rec, t):
     return None
 
 def load_activity_logs():
-    activity = {} # date -> {minute_timestamp -> (state, app, title)}
+    activity = {}
     if not os.path.exists(LOG_FILE): return activity
     try:
         with open(LOG_FILE, "r", encoding="utf-8") as f:
@@ -86,9 +78,7 @@ def load_activity_logs():
                 except: continue
                 d = dt.date()
                 if d not in activity: activity[d] = {}
-                state = parts[1]
-                app = parts[2] if len(parts) > 2 else "Unknown"
-                title = parts[3] if len(parts) > 3 else ""
+                state, app, title = parts[1], parts[2] if len(parts) > 2 else "Unknown", parts[3] if len(parts) > 3 else ""
                 activity[d][dt.replace(second=0, microsecond=0)] = (state, app, title)
     except: pass
     return activity
@@ -122,9 +112,7 @@ def build_slots_for_day(day, all_events, activity_data, now_dt):
         known_on_minutes = set()
         for s, e in slots:
             curr = s.replace(second=0, microsecond=0)
-            while curr <= e:
-                known_on_minutes.add(curr)
-                curr += datetime.timedelta(minutes=1)
+            while curr <= e: known_on_minutes.add(curr); curr += datetime.timedelta(minutes=1)
         for am in sorted(day_activity.keys()):
             if am not in known_on_minutes: slots.append((am, am + datetime.timedelta(minutes=1)))
         slots.sort(); merged = []
@@ -151,7 +139,7 @@ def build_slots_for_day(day, all_events, activity_data, now_dt):
             curr += datetime.timedelta(minutes=1)
     
     # --- Teramind Discrete Logic ---
-    EXPECTED_SAMPLES = (SLOT_MINUTES * 60) // 30 # 20 samples for 10 mins at 30s polling
+    EXPECTED_SAMPLES = (SLOT_MINUTES * 60) // 30
     buckets = {}
     for ts, data in day_activity.items():
         bucket_ts = ts.replace(minute=(ts.minute // SLOT_MINUTES) * SLOT_MINUTES)
@@ -164,14 +152,8 @@ def build_slots_for_day(day, all_events, activity_data, now_dt):
     for b_ts in sorted(buckets.keys()):
         samples = buckets[b_ts]
         active_samples = [s for s in samples if s[0] == 'active']
-        
-        # Determine actual minutes of activity in this 10m bucket
         active_minutes = len(active_samples) / 2 if len(active_samples) > 0 else 0
-        
-        # ALIGNMENT: Intensity is relative to the WHOLE 10-minute window
         intensity = (len(active_samples) / EXPECTED_SAMPLES) * 100
-        
-        # REALISM: Only count the slot if it has enough activity to be 'real' work
         if active_minutes >= SLOT_THRESHOLD_MINUTES:
             active_slots_count += 1
             total_intensity += intensity
@@ -179,9 +161,7 @@ def build_slots_for_day(day, all_events, activity_data, now_dt):
     
     discrete_min = active_slots_count * SLOT_MINUTES
     avg_intensity = (total_intensity / active_slots_count) if active_slots_count > 0 else 0
-
-    # --- Ultra-Realistic Aggregate ---
-    ultra_realistic_min = active_seconds / 60
+    ultra_min = active_seconds / 60
 
     return {
         "slots": slots,
@@ -192,7 +172,7 @@ def build_slots_for_day(day, all_events, activity_data, now_dt):
         "discrete_min": discrete_min,
         "avg_intensity": avg_intensity,
         "discrete_slots": discrete_slots,
-        "ultra_min": ultra_realistic_min
+        "ultra_min": ultra_min
     }
 
 def get_calendar_month_cycle(today):
@@ -210,7 +190,6 @@ def main():
         events = _read_log("System", datetime.datetime.combine(today - datetime.timedelta(days=30), datetime.time.min), _classify_system)
         events.sort(key=lambda x: x["time"])
         activity_data = load_activity_logs()
-        
         daily = {}
         day = today - datetime.timedelta(days=29)
         while day <= today:
@@ -221,16 +200,16 @@ def main():
     # 1. Header
     console.print(Panel(Text.assemble(("HYBRID TERAMIND & SYSTEM DASHBOARD\n", "bold green"), (f"Continuous & Discrete Analysis | {now_dt.strftime('%H:%M:%S')}", "dim")), box=box.DOUBLE, border_style="green"))
 
-    # 2. Key Productivity Stats (Today)
-    today_res = daily.get(today, {"system_td": datetime.timedelta(), "active_td": datetime.timedelta(), "hourly": [0]*24, "apps": [], "discrete_min": 0, "avg_intensity": 0, "slots": [], "discrete_slots": []})
+    # 2. Key Stats
+    today_res = daily.get(today, {"system_td": datetime.timedelta(), "active_td": datetime.timedelta(), "hourly": [0]*24, "apps": [], "discrete_min": 0, "avg_intensity": 0, "slots": [], "discrete_slots": [], "ultra_min": 0})
     
     score_color = "bright_green" if today_res["avg_intensity"] > 70 else "yellow" if today_res["avg_intensity"] > 40 else "red"
     stats_row = Table.grid(expand=True, padding=1)
     stats_row.add_column(ratio=1); stats_row.add_column(ratio=1); stats_row.add_column(ratio=1)
     stats_row.add_row(
-        Panel(f"[bold cyan]{fmt(today_res['discrete_min'])}[/bold cyan]\n[dim]Quantized Work Time[/dim]", border_style="cyan", title="Enterprise (Teramind)"),
-        Panel(f"[bold magenta]{fmt(today_res['ultra_min'])}[/bold magenta]\n[dim]True Active Duration[/dim]", border_style="magenta", title="Ultra-Realistic (Forensic)"),
-        Panel(f"[bold white]{fmt(today_res['system_td'])}[/bold white]\n[dim]Total System On Time[/dim]", border_style="white", title="System Presence")
+        Panel(f"[bold cyan]{fmt(today_res['discrete_min'])}[/bold cyan]\n[dim]Enterprise Quantized[/dim]", border_style="cyan", title="Work Time"),
+        Panel(f"[bold {score_color}]{today_res['avg_intensity']:.1f}%[/bold {score_color}]\n[dim]Mean Intensity Score[/dim]", border_style=score_color, title="Efficiency"),
+        Panel(f"[bold magenta]{fmt(today_res['ultra_min'])}[/bold magenta]\n[dim]True Active Duration[/dim]", border_style="magenta", title="Ultra-Realistic")
     )
     console.print(stats_row)
 
@@ -241,14 +220,14 @@ def main():
     month_progress = ProgressBar(total=MONTHLY_TARGET, completed=hours_done, width=None, finished_style="bright_green")
     console.print(Panel(Columns([f"[bold bright_blue]MTD: {hours_done:.1f}h / {MONTHLY_TARGET}h ({month_pct:.1f}%)[/bold bright_blue]", month_progress, f"[dim]Remaining: {max(0, MONTHLY_TARGET - hours_done):.1f}h[/dim]"], expand=True, align="left"), title="Monthly Target Tracker (176h)", border_style="bright_blue"))
 
-    # 4. App Distribution
+    # 4. Apps
     if today_res["apps"]:
         app_table = Table(box=box.SIMPLE, expand=True)
         app_table.add_column("Application Name", style="cyan"); app_table.add_column("Minutes (Approx)", justify="right", style="green")
         for app, count in today_res["apps"]: app_table.add_row(app, f"{count}m")
         console.print(Panel(app_table, title="Application Focus Distribution", border_style="dim"))
 
-    # 5. Hourly Intensity Map
+    # 5. Hourly Map
     heatmap = Text("Intensity: ", style="bold")
     for h in range(24):
         intensity = today_res["hourly"][h]
@@ -257,14 +236,12 @@ def main():
         heatmap.append(f" {h:02d}", style="dim"); heatmap.append(char, style=color)
     console.print(Panel(heatmap, title="Hourly Work Timeline", border_style="dim"))
 
-    # 6. Detailed Session Breakdown (Continuous)
+    # 6. Session Breakdown
     if today_res["slots"]:
         session_table = Table(box=box.SIMPLE, expand=True)
         session_table.add_column("#", style="dim"); session_table.add_column("Start Time", style="cyan"); session_table.add_column("End Time", style="cyan"); session_table.add_column("Duration", justify="right"); session_table.add_column("Activity %", justify="right")
         for i, (s, e) in enumerate(today_res["slots"]):
-            dur = e - s
-            act_m = 0
-            curr = s.replace(second=0, microsecond=0)
+            dur = e - s; act_m = 0; curr = s.replace(second=0, microsecond=0)
             while curr <= e:
                 entry = activity_data.get(today, {}).get(curr)
                 if entry and entry[0] == "active": act_m += 1
@@ -274,17 +251,17 @@ def main():
             session_table.add_row(str(i+1), s.strftime("%H:%M:%S"), e.strftime("%H:%M:%S"), fmt(dur), f"[{act_color}]{act_pct:.0f}%[/{act_color}]")
         console.print(Panel(session_table, title="Continuous Session Breakdown (Today)", border_style="dim"))
 
-    # 7. Discrete Slot Analysis (Teramind View)
+    # 7. Discrete Slot
     if today_res["discrete_slots"]:
         slot_table = Table(box=box.SIMPLE, expand=True)
         slot_table.add_column("10-Min Slot", style="dim"); slot_table.add_column("Intensity Bar", ratio=1); slot_table.add_column("Score", justify="right")
-        for slot in today_res["discrete_slots"][-10:]:
+        for slot in today_res["discrete_slots"][-8:]:
             bar_w = 20; filled = int((slot['intensity'] / 100) * bar_w); color = "bright_green" if slot['intensity'] > 70 else "yellow" if slot['intensity'] > 40 else "red"
             bar = f"[{color}]" + "█" * filled + "[/]" + "░" * (bar_w - filled)
             slot_table.add_row(f"{slot['start'].strftime('%H:%M')} - {slot['end'].strftime('%H:%M')}", bar, f"[{color}]{slot['intensity']:.0f}%[/]")
         console.print(Panel(slot_table, title="Teramind Discrete Slot Analysis (Recent)", border_style="dim"))
 
-    # 8. Historical Accountability Table
+    # 8. History
     table = Table(title="Historical Accountability (Last 30 Days)", box=box.ROUNDED, expand=True)
     table.add_column("Date", style="cyan"); table.add_column("System On", justify="right"); table.add_column("Focused", style="bright_green", justify="right"); table.add_column("Quantized", style="bright_blue", justify="right"); table.add_column("Intensity", justify="right"); table.add_column("Activity Intensity", ratio=1)
     for i in range(29, -1, -1):
