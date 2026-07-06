@@ -1,4 +1,5 @@
 import ctypes
+from ctypes import wintypes
 import datetime
 import os
 import signal
@@ -13,7 +14,7 @@ kernel32 = ctypes.windll.kernel32
 
 INPUT_IDLE_MINUTES = 5
 POLL_SECONDS = 60
-RETENTION_DAYS = 400  # Increased to keep over a year of history
+RETENTION_DAYS = 400
 LOG_DIR = os.path.expanduser("~/.screen_time")
 LOG_FILE = os.path.join(LOG_DIR, "activity.log")
 LOCK_FILE = os.path.join(LOG_DIR, "activity_logger.lock")
@@ -40,12 +41,34 @@ def _seconds_since_last_input():
     return elapsed_ms / 1000.0
 
 def get_foreground_app_name():
+    """Improved app name detection including fallback for elevated windows."""
     try:
         hwnd = user32.GetForegroundWindow()
-        _, pid = ctypes.wintypes.DWORD(), ctypes.wintypes.DWORD()
+        if not hwnd:
+            return "Idle/Desktop"
+            
+        pid = wintypes.DWORD()
         user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-        process = psutil.Process(pid.value)
-        return process.name()
+        
+        # Method 1: psutil (fastest, covers most user apps)
+        try:
+            process = psutil.Process(pid.value)
+            return process.name()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+            
+        # Method 2: Internal Windows Window Title (fallback for restricted PIDs)
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length > 0:
+            buff = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buff, length + 1)
+            # Try to extract app name from title (usually after last ' - ')
+            title = buff.value
+            if " - " in title:
+                return title.split(" - ")[-1]
+            return title[:30] # Limit length
+            
+        return "System/Elevated"
     except Exception:
         return "Unknown"
 
@@ -60,11 +83,7 @@ def _get_state():
 def _rotate_log():
     if not os.path.exists(LOG_FILE):
         return
-    # Archive logic: check if we should archive the previous month
     now = datetime.datetime.now()
-    first_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    
-    # Simple rotation: just keep RETENTION_DAYS
     cutoff = now - datetime.timedelta(days=RETENTION_DAYS)
     kept = []
     try:

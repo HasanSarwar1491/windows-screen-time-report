@@ -106,7 +106,7 @@ def load_activity_logs():
     activity = {} # date -> {minute_timestamp -> (state, app)}
     if not os.path.exists(LOG_FILE): return activity
     try:
-        with open(LOG_FILE, "r") as f:
+        with open(LOG_FILE, "r", encoding="utf-8") as f:
             for line in f:
                 parts = line.strip().split(",")
                 if len(parts) < 2: continue
@@ -124,6 +124,7 @@ def build_slots_for_day(day, all_events, activity_data, now_dt):
     next_midnight = day_start + datetime.timedelta(days=1)
     day_end = min(next_midnight, now_dt) if day == now_dt.date() else next_midnight
 
+    # Look back for power state
     lookback_events = [e for e in all_events if (day_start - datetime.timedelta(hours=2)) <= e["time"] < day_start]
     system_on_at_midnight = bool(lookback_events and lookback_events[-1]["type"] == "WAKE")
     
@@ -159,13 +160,45 @@ def build_slots_for_day(day, all_events, activity_data, now_dt):
             wake_time = None
     if wake_time is not None: slots.append((wake_time, day_end))
 
+    # ENHANCEMENT: If activity logs exist for a minute not in a slot, 
+    # we infer that the system was on.
+    day_activity = activity_data.get(day, {})
+    if day_activity:
+        # Create a combined set of minutes that we know the system was on
+        known_on_minutes = set()
+        for start, end in slots:
+            curr = start.replace(second=0, microsecond=0)
+            while curr <= end:
+                known_on_minutes.add(curr)
+                curr += datetime.timedelta(minutes=1)
+        
+        # Add minutes where activity was logged but not in a power slot
+        activity_minutes = sorted(day_activity.keys())
+        for am in activity_minutes:
+            if am not in known_on_minutes:
+                # Infer a 1-minute slot for this activity
+                slots.append((am, am + datetime.timedelta(minutes=1)))
+        
+        # Sort and merge overlapping slots
+        slots.sort()
+        merged = []
+        if slots:
+            curr_s, curr_e = slots[0]
+            for next_s, next_e in slots[1:]:
+                if next_s <= curr_e:
+                    curr_e = max(curr_e, next_e)
+                else:
+                    merged.append((curr_s, curr_e))
+                    curr_s, curr_e = next_s, next_e
+            merged.append((curr_s, curr_e))
+        slots = merged
+
     system_seconds = sum((e-s).total_seconds() for s, e in slots)
     
     active_seconds = 0
     hourly_activity = [0] * 24
     apps = []
-    if day in activity_data:
-        day_activity = activity_data[day]
+    if day_activity:
         for start, end in slots:
             curr = start.replace(second=0, microsecond=0)
             while curr <= end:
@@ -195,7 +228,7 @@ def main():
     prev_start, prev_end = get_previous_cycle(cur_start)
     now_dt = datetime.datetime.now()
     
-    with console.status("[bold blue]Generating Teramind-Style Accountability Report...", spinner="dots"):
+    with console.status("[bold blue]Generating High-Fidelity Teramind Report...", spinner="dots"):
         events = _read_log("System", datetime.datetime.combine(prev_start, datetime.time.min), _classify_system)
         events.sort(key=lambda x: x["time"])
         activity_data = load_activity_logs()
@@ -309,7 +342,7 @@ def main():
             intensity_bar
         )
     console.print(table)
-    console.print(f"[dim]Tracking logic optimized for Modern Standby and matched to Teramind thresholds (5m idle).[/dim]", justify="right")
+    console.print(f"[dim]Hybrid tracking: Logic combines Windows Power Events + Activity Logger data for maximum reliability.[/dim]", justify="right")
 
 if __name__ == "__main__":
     main()
