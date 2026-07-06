@@ -2,7 +2,7 @@
 setlocal enabledelayedexpansion
 
 echo =======================================================
-echo   Windows Accountability Tracker - First Time Setup
+echo   Windows Accountability Tracker - Setup & Restart
 echo =======================================================
 echo.
 
@@ -16,9 +16,17 @@ if %errorlevel% neq 0 (
 )
 echo [OK] Python detected.
 
-:: 2. Install Dependencies
+:: 2. Kill existing logger instances
 echo.
-echo [1/4] Installing required Python libraries...
+echo [1/5] Stopping any running tracker instances...
+taskkill /F /IM pythonw.exe /FI "WINDOWTITLE eq activity_logger.py" >nul 2>&1
+:: Also try killing by matching python processes if they are invisible
+powershell -Command "Get-Process pythonw -ErrorAction SilentlyContinue | Stop-Process -Force" >nul 2>&1
+echo [OK] Old instances stopped.
+
+:: 3. Install Dependencies
+echo.
+echo [2/5] Installing required Python libraries...
 python -m pip install --upgrade pip
 python -m pip install pywin32 rich psutil
 if %errorlevel% neq 0 (
@@ -27,9 +35,9 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
-:: 3. Create Startup Script (Silent Background Runner)
+:: 4. Create Startup Script (Silent Background Runner)
 echo.
-echo [2/4] Configuring background tracker to start with Windows...
+echo [3/5] Configuring background tracker to start with Windows...
 set "STARTUP_FOLDER=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup"
 set "VBS_SCRIPT=%STARTUP_FOLDER%\start_activity_logger.vbs"
 set "LOGGER_PATH=%~dp0activity_logger.py"
@@ -45,22 +53,24 @@ echo WshShell.Run "%PYTHONW_EXE% %LOGGER_PATH%", 0, False
 
 echo [OK] Startup script created at: %VBS_SCRIPT%
 
-:: 4. Start the logger immediately
+:: 5. Start the logger immediately
 echo.
-echo [3/4] Launching background activity logger...
+echo [4/5] Launching background activity logger...
+:: Remove lock file if it exists to ensure clean start
+if exist "%USERPROFILE%\.screen_time\activity_logger.lock" del /F "%USERPROFILE%\.screen_time\activity_logger.lock" >nul 2>&1
 start "" /B "%PYTHONW_EXE%" "%LOGGER_PATH%"
 echo [OK] Logger is now running silently in the background.
 
-:: 5. Final Run
+:: 6. Final Run
 echo.
-echo [4/4] Generating your first report...
+echo [5/5] Generating your first report...
 echo.
 timeout /t 2 >nul
 python "%~dp0screen_time.py"
 
 echo.
 echo =======================================================
-echo   SETUP COMPLETE! 
+echo   SETUP & RESTART COMPLETE! 
 echo =======================================================
 echo.
 echo  * The tracker will now start automatically when you log in.

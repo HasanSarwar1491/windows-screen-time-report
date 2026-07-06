@@ -13,7 +13,7 @@ user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
 
 INPUT_IDLE_MINUTES = 5
-POLL_SECONDS = 60
+POLL_SECONDS = 30
 RETENTION_DAYS = 400
 LOG_DIR = os.path.expanduser("~/.screen_time")
 LOG_FILE = os.path.join(LOG_DIR, "activity.log")
@@ -40,45 +40,50 @@ def _seconds_since_last_input():
         elapsed_ms = 0
     return elapsed_ms / 1000.0
 
-def get_foreground_app_name():
-    """Improved app name detection including fallback for elevated windows."""
+def get_foreground_info():
+    """Returns (app_name, window_title)"""
     try:
         hwnd = user32.GetForegroundWindow()
         if not hwnd:
-            return "Idle/Desktop"
+            return "Idle/Desktop", "Desktop"
             
         pid = wintypes.DWORD()
         user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
         
-        # Method 1: psutil (fastest, covers most user apps)
+        app_name = "Unknown"
+        window_title = "Unknown"
+
+        # Get Process Name
         try:
             process = psutil.Process(pid.value)
-            return process.name()
+            app_name = process.name()
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
             
-        # Method 2: Internal Windows Window Title (fallback for restricted PIDs)
+        # Get Window Title
         length = user32.GetWindowTextLengthW(hwnd)
         if length > 0:
             buff = ctypes.create_unicode_buffer(length + 1)
             user32.GetWindowTextW(hwnd, buff, length + 1)
-            # Try to extract app name from title (usually after last ' - ')
-            title = buff.value
-            if " - " in title:
-                return title.split(" - ")[-1]
-            return title[:30] # Limit length
+            window_title = buff.value.replace(",", ";") # Avoid CSV issues
             
-        return "System/Elevated"
+        if app_name == "Unknown" and window_title != "Unknown":
+            app_name = "System/Elevated"
+            
+        return app_name, window_title
     except Exception:
-        return "Unknown"
+        return "Unknown", "Unknown"
 
 def _get_state():
     seconds = _seconds_since_last_input()
     if seconds is None:
-        return "active", "Unknown"
+        return "active", "Unknown", "Unknown"
     state = "idle" if seconds >= INPUT_IDLE_MINUTES * 60 else "active"
-    app = get_foreground_app_name() if state == "active" else "None"
-    return state, app
+    if state == "active":
+        app, title = get_foreground_info()
+    else:
+        app, title = "None", "None"
+    return state, app, title
 
 def _rotate_log():
     if not os.path.exists(LOG_FILE):
@@ -91,7 +96,7 @@ def _rotate_log():
             for line in f:
                 line = line.strip()
                 if not line: continue
-                parts = line.split(",", 2)
+                parts = line.split(",", 1)
                 if len(parts) < 2: continue
                 try:
                     ts = datetime.datetime.fromisoformat(parts[0])
@@ -104,20 +109,18 @@ def _rotate_log():
     except Exception:
         pass
 
-def _append_state(state, app):
-    now = datetime.datetime.now().replace(second=0, microsecond=0)
+def _append_state(state, app, title):
+    now = datetime.datetime.now().replace(microsecond=0)
     try:
         with open(LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(f"{now.isoformat()},{state},{app}\n")
+            f.write(f"{now.isoformat()},{state},{app},{title}\n")
     except Exception:
         pass
 
 def _sleep_to_next_tick():
     now = time.time()
-    remainder = int(now) % POLL_SECONDS
+    remainder = now % POLL_SECONDS
     sleep_for = POLL_SECONDS - remainder
-    if sleep_for <= 0:
-        sleep_for = POLL_SECONDS
     time.sleep(sleep_for)
 
 def main():
@@ -141,8 +144,8 @@ def main():
     _rotate_log()
 
     while should_run["value"]:
-        state, app = _get_state()
-        _append_state(state, app)
+        state, app, title = _get_state()
+        _append_state(state, app, title)
         _sleep_to_next_tick()
     
     lock_file_handle.close()
