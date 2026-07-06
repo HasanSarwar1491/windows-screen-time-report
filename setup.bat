@@ -43,8 +43,16 @@ set "VBS_SCRIPT=%STARTUP_FOLDER%\start_activity_logger.vbs"
 set "LOGGER_PATH=%~dp0activity_logger.py"
 
 :: Get pythonw.exe path (runs without console window)
+for /f "delims=" %%i in ('where pythonw') do (
+    set "PYTHONW_EXE=%%i"
+    goto :found_pythonw
+)
+:: Fallback if where pythonw fails
 for /f "delims=" %%i in ('where python') do set "PYTHON_EXE=%%i"
 set "PYTHONW_EXE=%PYTHON_EXE:python.exe=pythonw.exe%"
+
+:found_pythonw
+echo [OK] Using PythonW at: %PYTHONW_EXE%
 
 (
 echo Set WshShell = CreateObject^("WScript.Shell"^)
