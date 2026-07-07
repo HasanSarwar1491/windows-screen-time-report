@@ -178,7 +178,9 @@ def load_activity_logs():
                 state = parts[1]
                 app = parts[2] if len(parts) > 2 else "Unknown"
                 title = parts[3] if len(parts) > 3 else ""
-                activity[d][dt.replace(second=0, microsecond=0)] = (state, app, title)
+                # active_seconds is index 4, default to 0 for old logs
+                active_secs = int(parts[4]) if len(parts) > 4 else 0
+                activity[d][dt.replace(second=0, microsecond=0)] = (state, app, title, active_secs)
     except Exception:
         pass
 
@@ -290,11 +292,18 @@ def build_slots_for_day(day, all_events, activity_data, now_dt):
 
     for b_ts in sorted(buckets.keys()):
         samples = buckets[b_ts]
-        active_samples = [s for s in samples if s[0] == "active"]
-        active_minutes = len(active_samples) / 2 if active_samples else 0
-        intensity = (len(active_samples) / expected_samples) * 100
+        # Calculate intensity based on active seconds across all samples in bucket
+        # Each sample is POLL_SECONDS (30s)
+        total_active_seconds = sum(s[3] for s in samples)
+        expected_seconds = (SLOT_MINUTES * 60)
+        
+        intensity = (total_active_seconds / expected_seconds) * 100
+        # Cap intensity at 100% (in case of overlap/drift)
+        intensity = min(100.0, intensity)
 
-        if active_minutes >= SLOT_THRESHOLD_MINUTES:
+        # We count a slot as 'worked' if it has at least some significant activity
+        # Replicating Teramind logic: if intensity > 0 or meets a threshold
+        if intensity > 1.0: # threshold of ~3 seconds of activity in 5 mins
             active_slots_count += 1
             total_intensity += intensity
             discrete_slots.append(
