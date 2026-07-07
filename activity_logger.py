@@ -22,7 +22,7 @@ INPUT_IDLE_MINUTES = 5
 POLL_SECONDS = 30
 RETENTION_DAYS = 400
 
-# Counters for Teramind-like activity tracking
+# Counters for input density activity tracking
 # We track how many seconds in the POLL_SECONDS window had at least one event
 activity_lock = threading.Lock()
 active_seconds_set = set() # Stores the second offsets within the current window that had activity
@@ -45,7 +45,7 @@ def on_scroll(x, y, dx, dy):
 
 def on_move(x, y):
     # Optional: Significant movement only?
-    # For now, any movement counts as activity per Teramind logic
+    # For now, any movement counts as activity logic
     on_input()
 
 class LASTINPUTINFO(ctypes.Structure):

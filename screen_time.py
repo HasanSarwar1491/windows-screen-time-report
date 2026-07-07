@@ -279,7 +279,7 @@ def build_slots_for_day(day, all_events, activity_data, now_dt):
                 apps.append(entry[1])
             curr += datetime.timedelta(minutes=1)
 
-    # Teramind Discrete Logic
+    # High-Fidelity Discrete Logic
     expected_samples = (SLOT_MINUTES * 60) // 30
     buckets = {}
     for ts, data in day_activity.items():
@@ -302,7 +302,7 @@ def build_slots_for_day(day, all_events, activity_data, now_dt):
         intensity = min(100.0, intensity)
 
         # We count a slot as 'worked' if it has at least some significant activity
-        # Replicating Teramind logic: if intensity > 0 or meets a threshold
+        # If intensity > 0 or meets a threshold
         if intensity > 1.0: # threshold of ~3 seconds of activity in 5 mins
             active_slots_count += 1
             total_intensity += intensity
@@ -361,7 +361,7 @@ def main():
     console.print(
         Panel(
             Text.assemble(
-                ("HYBRID TERAMIND & SYSTEM DASHBOARD\n", "bold green"),
+                ("HYBRID ACTIVITY & SYSTEM DASHBOARD\n", "bold green"),
                 (f"Continuous & Discrete Analysis | {now_dt.strftime('%H:%M:%S')}", "dim"),
             ),
             box=box.DOUBLE,
@@ -579,7 +579,7 @@ def main():
                 f"[{color}]{slot['intensity']:.0f}%[/]",
             )
 
-        console.print(Panel(slot_table, title="Teramind Discrete Slot Analysis (Recent)", border_style="dim"))
+        console.print(Panel(slot_table, title="Discrete High-Fidelity Slot Analysis (Recent)", border_style="dim"))
 
     # 9) Historical table (Last 30 days) with day bounds
     table = Table(title="Historical Accountability (Last 30 Days)", box=box.ROUNDED, expand=True)
