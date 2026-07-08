@@ -22,7 +22,7 @@ REQUIRED_HOURS = 8
 CYCLE_TARGET_HOURS = 176
 CYCLE_START_DAY = 16
 SLOT_MINUTES = 5
-SLOT_THRESHOLD_MINUTES = 2
+SLOT_THRESHOLD_MINUTES = 0.0833
 
 console = Console()
 LOG_FILE = os.path.expanduser("~/.screen_time/activity.log")
@@ -162,7 +162,7 @@ def load_activity_logs():
     try:
         with open(LOG_FILE, "r", encoding="utf-8") as f:
             for line in f:
-                parts = line.strip().split(",", 3)
+                parts = line.strip().split(",", 4)
                 if len(parts) < 2:
                     continue
 
