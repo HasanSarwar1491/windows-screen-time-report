@@ -123,35 +123,35 @@ def _read_log(logname, cutoff, classifier):
                 if t < cutoff:
                     hit_cutoff = True
                     break
-                result = classifier(rec, t)
-                if result:
-                    events.append(result)
-
+                
+                type_name, evt_id = classifier(rec, t)
+                if type_name:
+                    events.append({"time": t, "type": type_name, "id": evt_id})
+            
             if hit_cutoff:
                 break
     finally:
         win32evtlog.CloseEventLog(hand)
-
+    
     return events
 
 
 def _classify_system(rec, t):
+    # Standard Windows System Log Source: Kernel-General (1, 12, 13) or Power-Troubleshooter (1)
+    # 107 = System Resume, 42 = Sleep, 1 = Wake, 12/13 = Startup/Shutdown
     eid = rec.EventID & 0xFFFF
-    src = rec.SourceName.lower()
-
-    if "kernel-power" in src:
-        if eid in (42, 506):
-            return {"time": t, "id": eid, "type": "SLEEP"}
-        if eid in (107, 507):
-            return {"time": t, "id": eid, "type": "WAKE"}
-
-    if src == "eventlog":
-        if eid == 6005:
-            return {"time": t, "id": eid, "type": "WAKE"}
-        if eid == 6006:
-            return {"time": t, "id": eid, "type": "SLEEP"}
-
-    return None
+    src = rec.SourceName
+    
+    if src == "Microsoft-Windows-Kernel-General":
+        if eid == 12: return "WAKE", eid   # OS Startup
+        if eid == 13: return "SLEEP", eid  # OS Shutdown
+    if src == "Microsoft-Windows-Power-Troubleshooter":
+        if eid == 1: return "WAKE", eid    # Resume
+    if src == "Microsoft-Windows-Kernel-Power":
+        if eid == 42: return "SLEEP", eid  # Sleep
+        if eid == 107: return "WAKE", eid  # System Resume
+        
+    return None, None
 
 
 def load_activity_logs():
@@ -163,7 +163,7 @@ def load_activity_logs():
         with open(LOG_FILE, "r", encoding="utf-8") as f:
             for line in f:
                 parts = line.strip().split(",", 4)
-                if len(parts) < 2:
+                if len(parts) < 5:
                     continue
 
                 try:
@@ -175,21 +175,15 @@ def load_activity_logs():
                 if d not in activity:
                     activity[d] = {}
 
-                state = parts[1]
-                app = parts[2] if len(parts) > 2 else "Unknown"
-                title = parts[3] if len(parts) > 3 else ""
-                # active_seconds is index 4, default to 0 for old logs
-                active_secs = int(parts[4]) if len(parts) > 4 else 0
-                activity[d][dt.replace(second=0, microsecond=0)] = (state, app, title, active_secs)
+                # parts[1]=state, parts[2]=app, parts[3]=title, parts[4]=active_seconds
+                activity[d][dt.replace(second=0, microsecond=0)] = (
+                    parts[1], parts[2], parts[3], int(parts[4])
+                )
     except Exception:
         pass
-
     return activity
 
 
-# -----------------------------
-# Per-day computation
-# -----------------------------
 def build_slots_for_day(day, all_events, activity_data, now_dt):
     day_start = datetime.datetime.combine(day, datetime.time.min)
     next_midnight = day_start + datetime.timedelta(days=1)
@@ -212,33 +206,25 @@ def build_slots_for_day(day, all_events, activity_data, now_dt):
             and today_events[idx - 1]["id"] == 42
             and (event["time"] - today_events[idx - 1]["time"]).total_seconds() <= 60
         )
-
-        is_display_blip_wake = (
-            event["type"] == "WAKE"
-            and event["id"] == 507
-            and idx > 0
-            and today_events[idx - 1]["id"] == 506
-            and (event["time"] - today_events[idx - 1]["time"]).total_seconds() == 0
-        )
-
-        if not is_shutdown_artifact_wake and not is_display_blip_wake:
+        if not is_shutdown_artifact_wake:
             processed.append(event)
 
     slots = []
-    wake_time = day_start if system_on_at_midnight else None
-
+    current_wake = day_start if system_on_at_midnight else None
+    
     for event in processed:
-        if event["type"] == "WAKE" and wake_time is None:
-            wake_time = event["time"]
-        elif event["type"] == "SLEEP" and wake_time is not None:
-            if (event["time"] - wake_time).total_seconds() > 5:
-                slots.append((wake_time, event["time"]))
-            wake_time = None
-
-    if wake_time is not None:
-        slots.append((wake_time, day_end))
+        if event["type"] == "WAKE" and not current_wake:
+            current_wake = event["time"]
+        elif event["type"] == "SLEEP" and current_wake:
+            slots.append((current_wake, event["time"]))
+            current_wake = None
+            
+    if current_wake:
+        slots.append((current_wake, day_end))
 
     day_activity = activity_data.get(day, {})
+    
+    # NEW: Ensure slots include any activity recorded in the logger even if power logs missed it
     if day_activity:
         known_on_minutes = set()
         for s, e in slots:
@@ -249,9 +235,11 @@ def build_slots_for_day(day, all_events, activity_data, now_dt):
 
         for am in sorted(day_activity.keys()):
             if am not in known_on_minutes:
+                # Add a 1-minute slot for any recorded activity not covered by power events
                 slots.append((am, am + datetime.timedelta(minutes=1)))
 
         slots.sort()
+        # Merge overlapping slots and account for activity even if power log is messy
         merged = []
         if slots:
             curr_s, curr_e = slots[0]
@@ -280,10 +268,10 @@ def build_slots_for_day(day, all_events, activity_data, now_dt):
             curr += datetime.timedelta(minutes=1)
 
     # High-Fidelity Discrete Logic
-    expected_samples = (SLOT_MINUTES * 60) // 30
     buckets = {}
     for ts, data in day_activity.items():
-        bucket_ts = ts.replace(minute=(ts.minute // SLOT_MINUTES) * SLOT_MINUTES)
+        # Correctly bucket by stripping seconds to match SLOT_MINUTES alignment
+        bucket_ts = ts.replace(minute=(ts.minute // SLOT_MINUTES) * SLOT_MINUTES, second=0, microsecond=0)
         buckets.setdefault(bucket_ts, []).append(data)
 
     active_slots_count = 0
@@ -297,13 +285,16 @@ def build_slots_for_day(day, all_events, activity_data, now_dt):
         total_active_seconds = sum(s[3] for s in samples)
         expected_seconds = (SLOT_MINUTES * 60)
         
-        intensity = (total_active_seconds / expected_seconds) * 100
-        # Cap intensity at 100% (in case of overlap/drift)
+        # Scaling for activity saturation threshold. 
+        # Most enterprise trackers reach 100% activity if you are active ~50% of the time.
+        # We multiply by 2.0 (or divide expected by 0.5) to make it less aggressive.
+        intensity = (total_active_seconds / (expected_seconds * 0.5)) * 100
+        # Cap intensity at 100%
         intensity = min(100.0, intensity)
 
         # We count a slot as 'worked' if it has at least some significant activity
-        # If intensity > 0 or meets a threshold
-        if intensity > 1.0: # threshold of ~3 seconds of activity in 5 mins
+        # If intensity > 1.0% or meets a threshold
+        if intensity > 1.0: 
             active_slots_count += 1
             total_intensity += intensity
             discrete_slots.append(
@@ -415,8 +406,6 @@ def main():
     console.print(stats_row)
 
     # 3) Dynamic cycle tracker (16th -> 15th), cycle-to-date
-    # Target tracking is based on System-On hours.
-    # Focused + intensity are shown as quality indicators.
     cycle_to_date = summarize_period(daily, cycle_start, today)
 
     cycle_system_hours = cycle_to_date["system_td"].total_seconds() / 3600
@@ -501,7 +490,7 @@ def main():
     heatmap = Text("Intensity: ", style="bold")
     for h in range(24):
         intensity = today_res["hourly"][h]
-        char = "█" if intensity > 45 else "▆" if intensity > 30 else "▄" if intensity > 10 else "▂" if intensity > 0 else " "
+        char = "█" if intensity > 45 else "▆" if intensity > 30 else "▃" if intensity > 10 else "▂" if intensity > 0 else " "
         color = "bright_green" if intensity > 30 else "yellow" if intensity > 10 else "dim"
         heatmap.append(f" {h:02d}", style="dim")
         heatmap.append(char, style=color)
@@ -511,72 +500,28 @@ def main():
     if today_res["slots"]:
         session_table = Table(box=box.SIMPLE, expand=True)
         session_table.add_column("#", style="dim")
-        session_table.add_column("Start Time", style="cyan")
-        session_table.add_column("End Time", style="cyan")
+        session_table.add_column("Session Range", style="cyan")
         session_table.add_column("Duration", justify="right")
-        session_table.add_column("Activity %", justify="right")
+        for i, (s, e) in enumerate(today_res["slots"], 1):
+            session_table.add_row(str(i), f"{s.strftime('%H:%M:%S')} - {e.strftime('%H:%M:%S')}", fmt(e - s))
+        console.print(Panel(session_table, title="Daily System Presence (Sessions)", border_style="dim"))
 
-        for i, (s, e) in enumerate(today_res["slots"]):
-            dur = e - s
-            act_m = 0
-            curr = s.replace(second=0, microsecond=0)
-            while curr <= e:
-                entry = activity_data.get(today, {}).get(curr)
-                if entry and entry[0] == "active":
-                    act_m += 1
-                curr += datetime.timedelta(minutes=1)
-
-            act_pct = (act_m / (dur.total_seconds() / 60) * 100) if dur.total_seconds() > 0 else 0
-            act_color = "bright_green" if act_pct > 75 else "yellow" if act_pct > 40 else "red"
-            session_table.add_row(
-                str(i + 1),
-                s.strftime("%H:%M:%S"),
-                e.strftime("%H:%M:%S"),
-                fmt(dur),
-                f"[{act_color}]{act_pct:.0f}%[/{act_color}]",
-            )
-
-        console.print(Panel(session_table, title="Continuous Session Breakdown (Today)", border_style="dim"))
-
-        total_duration = sum((e - s for s, e in today_res["slots"]), datetime.timedelta())
-        total_act_m = 0
-        for s, e in today_res["slots"]:
-            curr = s.replace(second=0, microsecond=0)
-            while curr <= e:
-                if activity_data.get(today, {}).get(curr, (None,))[0] == "active":
-                    total_act_m += 1
-                curr += datetime.timedelta(minutes=1)
-
-        avg_act_pct = (total_act_m / (total_duration.total_seconds() / 60) * 100) if total_duration.total_seconds() > 0 else 0
-        total_color = "bright_green" if avg_act_pct > 75 else "yellow" if avg_act_pct > 40 else "red"
-
-        summary_row = Table(box=None, expand=True, show_header=False)
-        summary_row.add_column(ratio=1)
-        summary_row.add_column(justify="right", width=20)
-        summary_row.add_column(justify="right", width=15)
-        summary_row.add_row(
-            "[bold]TOTAL[/bold]",
-            f"[bold]{fmt(total_duration)}[/bold]",
-            f"[{total_color}][bold]{avg_act_pct:.0f}%[/bold][/{total_color}]",
-        )
-        console.print(summary_row)
-
-    # 8) Discrete slot table
+    # 8) Discrete breakdown (today)
     if today_res["discrete_slots"]:
         slot_table = Table(box=box.SIMPLE, expand=True)
-        slot_table.add_column(f"{SLOT_MINUTES}-Min Slot", style="dim")
+        slot_table.add_column("Time Slot", style="cyan")
+        slot_table.add_column("Intensity Score", justify="right")
         slot_table.add_column("Intensity Bar", ratio=1)
-        slot_table.add_column("Score", justify="right")
-
-        for slot in today_res["discrete_slots"][-8:]:
-            bar_w = 20
-            filled = int((slot["intensity"] / 100) * bar_w)
-            color = "bright_green" if slot["intensity"] > 70 else "yellow" if slot["intensity"] > 40 else "red"
-            bar = f"[{color}]" + "█" * filled + "[/]" + "░" * (bar_w - filled)
+        
+        # Show last 12 slots
+        for s in today_res["discrete_slots"][-12:]:
+            score = s["intensity"]
+            color = "bright_green" if score > 70 else "yellow" if score > 30 else "red"
+            bar_width = int(score / 5)
             slot_table.add_row(
-                f"{slot['start'].strftime('%H:%M')} - {slot['end'].strftime('%H:%M')}",
-                bar,
-                f"[{color}]{slot['intensity']:.0f}%[/]",
+                f"{s['start'].strftime('%H:%M')} - {s['end'].strftime('%H:%M')}",
+                f"[{color}]{score:.1f}%[/{color}]",
+                f"[{color}]{'█' * bar_width}[/{color}]"
             )
 
         console.print(Panel(slot_table, title="Discrete High-Fidelity Slot Analysis (Recent)", border_style="dim"))
