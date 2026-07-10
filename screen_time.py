@@ -239,6 +239,14 @@ def build_slots_for_day(day, all_events, activity_data, now_dt):
         slots.append((wake_time, day_end))
 
     day_activity = activity_data.get(day, {})
+
+    def is_lock_entry(entry):
+        if not entry or len(entry) < 3:
+            return False
+        app = (entry[1] or "").lower()
+        title = (entry[2] or "").lower()
+        return app == "lockapp.exe" or "lock screen" in title
+
     if day_activity:
         known_on_minutes = set()
         for s, e in slots:
@@ -264,12 +272,46 @@ def build_slots_for_day(day, all_events, activity_data, now_dt):
             merged.append((curr_s, curr_e))
         slots = merged
 
-    system_seconds = sum((e - s).total_seconds() for s, e in slots)
+    # Keep raw sessions for display, but compute metrics on effective slots.
+    raw_slots = list(slots)
+
+    lock_minutes = sorted(ts for ts, entry in day_activity.items() if is_lock_entry(entry))
+    lock_intervals = []
+    if lock_minutes:
+        start_lock = lock_minutes[0]
+        prev = start_lock
+        for ts in lock_minutes[1:]:
+            if ts == prev + datetime.timedelta(minutes=1):
+                prev = ts
+            else:
+                lock_intervals.append((start_lock, prev + datetime.timedelta(minutes=1)))
+                start_lock = prev = ts
+        lock_intervals.append((start_lock, prev + datetime.timedelta(minutes=1)))
+
+    effective_slots = []
+    for s, e in raw_slots:
+        pieces = [(s, e)]
+        for ls, le in lock_intervals:
+            next_pieces = []
+            for ps, pe in pieces:
+                if le <= ps or ls >= pe:
+                    next_pieces.append((ps, pe))
+                else:
+                    if ls > ps:
+                        next_pieces.append((ps, ls))
+                    if le < pe:
+                        next_pieces.append((le, pe))
+            pieces = next_pieces
+            if not pieces:
+                break
+        effective_slots.extend((ps, pe) for ps, pe in pieces if pe > ps)
+
+    system_seconds = sum((e - s).total_seconds() for s, e in effective_slots)
 
     active_seconds = 0
     hourly_activity = [0] * 24
     apps = []
-    for start, end in slots:
+    for start, end in effective_slots:
         curr = start.replace(second=0, microsecond=0)
         while curr <= end:
             entry = day_activity.get(curr)
@@ -283,6 +325,8 @@ def build_slots_for_day(day, all_events, activity_data, now_dt):
     expected_samples = (SLOT_MINUTES * 60) // 30
     buckets = {}
     for ts, data in day_activity.items():
+        if is_lock_entry(data):
+            continue
         bucket_ts = ts.replace(minute=(ts.minute // SLOT_MINUTES) * SLOT_MINUTES)
         buckets.setdefault(bucket_ts, []).append(data)
 
@@ -319,7 +363,7 @@ def build_slots_for_day(day, all_events, activity_data, now_dt):
     ultra_min = active_seconds / 60
 
     return {
-        "slots": slots,
+        "slots": raw_slots,
         "system_td": datetime.timedelta(seconds=system_seconds),
         "active_td": datetime.timedelta(seconds=active_seconds),
         "hourly": hourly_activity,
