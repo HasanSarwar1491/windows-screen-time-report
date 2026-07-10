@@ -22,7 +22,7 @@ REQUIRED_HOURS = 8
 CYCLE_TARGET_HOURS = 176
 CYCLE_START_DAY = 16
 SLOT_MINUTES = 5
-SLOT_THRESHOLD_MINUTES = 2
+SLOT_THRESHOLD_MINUTES = 0.0833
 
 console = Console()
 LOG_FILE = os.path.expanduser("~/.screen_time/activity.log")
@@ -162,7 +162,7 @@ def load_activity_logs():
     try:
         with open(LOG_FILE, "r", encoding="utf-8") as f:
             for line in f:
-                parts = line.strip().split(",", 3)
+                parts = line.strip().split(",", 4)
                 if len(parts) < 2:
                     continue
 
@@ -178,7 +178,9 @@ def load_activity_logs():
                 state = parts[1]
                 app = parts[2] if len(parts) > 2 else "Unknown"
                 title = parts[3] if len(parts) > 3 else ""
-                activity[d][dt.replace(second=0, microsecond=0)] = (state, app, title)
+                # active_seconds is index 4, default to 0 for old logs
+                active_secs = int(parts[4]) if len(parts) > 4 else 0
+                activity[d][dt.replace(second=0, microsecond=0)] = (state, app, title, active_secs)
     except Exception:
         pass
 
@@ -237,6 +239,14 @@ def build_slots_for_day(day, all_events, activity_data, now_dt):
         slots.append((wake_time, day_end))
 
     day_activity = activity_data.get(day, {})
+
+    def is_lock_entry(entry):
+        if not entry or len(entry) < 3:
+            return False
+        app = (entry[1] or "").lower()
+        title = (entry[2] or "").lower()
+        return app == "lockapp.exe" or "lock screen" in title
+
     if day_activity:
         known_on_minutes = set()
         for s, e in slots:
@@ -262,12 +272,55 @@ def build_slots_for_day(day, all_events, activity_data, now_dt):
             merged.append((curr_s, curr_e))
         slots = merged
 
-    system_seconds = sum((e - s).total_seconds() for s, e in slots)
+    # Keep raw sessions for display, but compute metrics on effective slots.
+    raw_slots = list(slots)
+
+    lock_minutes = sorted(ts for ts, entry in day_activity.items() if is_lock_entry(entry))
+    lock_intervals = []
+    if lock_minutes:
+        start_lock = lock_minutes[0]
+        prev = start_lock
+        for ts in lock_minutes[1:]:
+            if ts == prev + datetime.timedelta(minutes=1):
+                prev = ts
+            else:
+                lock_intervals.append((start_lock, prev + datetime.timedelta(minutes=1)))
+                start_lock = prev = ts
+        lock_intervals.append((start_lock, prev + datetime.timedelta(minutes=1)))
+
+    effective_slots = []
+    for s, e in raw_slots:
+        pieces = [(s, e)]
+        for ls, le in lock_intervals:
+            next_pieces = []
+            for ps, pe in pieces:
+                if le <= ps or ls >= pe:
+                    next_pieces.append((ps, pe))
+                else:
+                    if ls > ps:
+                        next_pieces.append((ps, ls))
+                    if le < pe:
+                        next_pieces.append((le, pe))
+            pieces = next_pieces
+            if not pieces:
+                break
+        effective_slots.extend((ps, pe) for ps, pe in pieces if pe > ps)
+
+    system_seconds = sum((e - s).total_seconds() for s, e in effective_slots)
+
+    def overlap_minutes_with_effective_slots(start_dt, end_dt):
+        overlap_seconds = 0.0
+        for es, ee in effective_slots:
+            ov_start = max(start_dt, es)
+            ov_end = min(end_dt, ee)
+            if ov_end > ov_start:
+                overlap_seconds += (ov_end - ov_start).total_seconds()
+        return overlap_seconds / 60.0
 
     active_seconds = 0
     hourly_activity = [0] * 24
     apps = []
-    for start, end in slots:
+    for start, end in effective_slots:
         curr = start.replace(second=0, microsecond=0)
         while curr <= end:
             entry = day_activity.get(curr)
@@ -277,40 +330,58 @@ def build_slots_for_day(day, all_events, activity_data, now_dt):
                 apps.append(entry[1])
             curr += datetime.timedelta(minutes=1)
 
-    # Teramind Discrete Logic
+    # High-Fidelity Discrete Logic
     expected_samples = (SLOT_MINUTES * 60) // 30
     buckets = {}
     for ts, data in day_activity.items():
+        if is_lock_entry(data):
+            continue
         bucket_ts = ts.replace(minute=(ts.minute // SLOT_MINUTES) * SLOT_MINUTES)
         buckets.setdefault(bucket_ts, []).append(data)
 
     active_slots_count = 0
     total_intensity = 0
+    quantized_minutes = 0.0
     discrete_slots = []
 
     for b_ts in sorted(buckets.keys()):
         samples = buckets[b_ts]
-        active_samples = [s for s in samples if s[0] == "active"]
-        active_minutes = len(active_samples) / 2 if active_samples else 0
-        intensity = (len(active_samples) / expected_samples) * 100
+        bucket_start = b_ts
+        bucket_end = b_ts + datetime.timedelta(minutes=SLOT_MINUTES)
 
-        if active_minutes >= SLOT_THRESHOLD_MINUTES:
+        effective_overlap_minutes = overlap_minutes_with_effective_slots(bucket_start, bucket_end)
+        if effective_overlap_minutes <= 0:
+            continue
+
+        # Calculate intensity based on active seconds across all samples in bucket
+        # Each sample is POLL_SECONDS (30s)
+        total_active_seconds = sum(s[3] for s in samples)
+        expected_seconds = (SLOT_MINUTES * 60)
+
+        intensity = (total_active_seconds / (expected_seconds * 0.5)) * 100
+        # Cap intensity at 100% (in case of overlap/drift)
+        intensity = min(100.0, intensity)
+
+        # We count a slot as 'worked' if it has at least some significant activity
+        # If intensity > 0 or meets a threshold
+        if intensity > 1.0: # threshold of ~3 seconds of activity in 5 mins
             active_slots_count += 1
             total_intensity += intensity
+            quantized_minutes += effective_overlap_minutes
             discrete_slots.append(
                 {
-                    "start": b_ts,
-                    "end": b_ts + datetime.timedelta(minutes=SLOT_MINUTES),
+                    "start": bucket_start,
+                    "end": bucket_end,
                     "intensity": intensity,
                 }
             )
 
-    discrete_min = active_slots_count * SLOT_MINUTES
+    discrete_min = int(quantized_minutes)
     avg_intensity = (total_intensity / active_slots_count) if active_slots_count > 0 else 0
     ultra_min = active_seconds / 60
 
     return {
-        "slots": slots,
+        "slots": raw_slots,
         "system_td": datetime.timedelta(seconds=system_seconds),
         "active_td": datetime.timedelta(seconds=active_seconds),
         "hourly": hourly_activity,
@@ -352,7 +423,7 @@ def main():
     console.print(
         Panel(
             Text.assemble(
-                ("HYBRID TERAMIND & SYSTEM DASHBOARD\n", "bold green"),
+                ("HYBRID ACTIVITY & SYSTEM DASHBOARD\n", "bold green"),
                 (f"Continuous & Discrete Analysis | {now_dt.strftime('%H:%M:%S')}", "dim"),
             ),
             box=box.DOUBLE,
@@ -570,7 +641,7 @@ def main():
                 f"[{color}]{slot['intensity']:.0f}%[/]",
             )
 
-        console.print(Panel(slot_table, title="Teramind Discrete Slot Analysis (Recent)", border_style="dim"))
+        console.print(Panel(slot_table, title="Discrete High-Fidelity Slot Analysis (Recent)", border_style="dim"))
 
     # 9) Historical table (Last 30 days) with day bounds
     table = Table(title="Historical Accountability (Last 30 Days)", box=box.ROUNDED, expand=True)
