@@ -308,6 +308,15 @@ def build_slots_for_day(day, all_events, activity_data, now_dt):
 
     system_seconds = sum((e - s).total_seconds() for s, e in effective_slots)
 
+    def overlap_minutes_with_effective_slots(start_dt, end_dt):
+        overlap_seconds = 0.0
+        for es, ee in effective_slots:
+            ov_start = max(start_dt, es)
+            ov_end = min(end_dt, ee)
+            if ov_end > ov_start:
+                overlap_seconds += (ov_end - ov_start).total_seconds()
+        return overlap_seconds / 60.0
+
     active_seconds = 0
     hourly_activity = [0] * 24
     apps = []
@@ -332,15 +341,23 @@ def build_slots_for_day(day, all_events, activity_data, now_dt):
 
     active_slots_count = 0
     total_intensity = 0
+    quantized_minutes = 0.0
     discrete_slots = []
 
     for b_ts in sorted(buckets.keys()):
         samples = buckets[b_ts]
+        bucket_start = b_ts
+        bucket_end = b_ts + datetime.timedelta(minutes=SLOT_MINUTES)
+
+        effective_overlap_minutes = overlap_minutes_with_effective_slots(bucket_start, bucket_end)
+        if effective_overlap_minutes <= 0:
+            continue
+
         # Calculate intensity based on active seconds across all samples in bucket
         # Each sample is POLL_SECONDS (30s)
         total_active_seconds = sum(s[3] for s in samples)
         expected_seconds = (SLOT_MINUTES * 60)
-        
+
         intensity = (total_active_seconds / (expected_seconds * 0.5)) * 100
         # Cap intensity at 100% (in case of overlap/drift)
         intensity = min(100.0, intensity)
@@ -350,15 +367,16 @@ def build_slots_for_day(day, all_events, activity_data, now_dt):
         if intensity > 1.0: # threshold of ~3 seconds of activity in 5 mins
             active_slots_count += 1
             total_intensity += intensity
+            quantized_minutes += effective_overlap_minutes
             discrete_slots.append(
                 {
-                    "start": b_ts,
-                    "end": b_ts + datetime.timedelta(minutes=SLOT_MINUTES),
+                    "start": bucket_start,
+                    "end": bucket_end,
                     "intensity": intensity,
                 }
             )
 
-    discrete_min = active_slots_count * SLOT_MINUTES
+    discrete_min = int(quantized_minutes)
     avg_intensity = (total_intensity / active_slots_count) if active_slots_count > 0 else 0
     ultra_min = active_seconds / 60
 
