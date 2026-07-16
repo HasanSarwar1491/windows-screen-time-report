@@ -7,6 +7,8 @@ import time
 import sys
 import msvcrt
 import psutil
+from pynput import mouse, keyboard
+import threading
 
 # Windows API
 user32 = ctypes.windll.user32
@@ -20,25 +22,37 @@ INPUT_IDLE_MINUTES = 5
 POLL_SECONDS = 30
 RETENTION_DAYS = 400
 
+# Counters for input density activity tracking
+# We track how many seconds in the POLL_SECONDS window had at least one event
+activity_lock = threading.Lock()
+active_seconds_set = set() # Stores the second offsets within the current window that had activity
+
+def on_input():
+    global active_seconds_set
+    with activity_lock:
+        # Map current time to a discrete second to avoid double counting multiple events in same second
+        active_seconds_set.add(int(time.time()))
+
+def on_click(x, y, button, pressed):
+    if pressed:
+        on_input()
+
+def on_press(key):
+    on_input()
+
+def on_scroll(x, y, dx, dy):
+    on_input()
+
+def on_move(x, y):
+    # Optional: Significant movement only?
+    # For now, any movement counts as activity logic
+    on_input()
+
 class LASTINPUTINFO(ctypes.Structure):
     _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint)]
 
 def _ensure_log_dir():
     os.makedirs(LOG_DIR, exist_ok=True)
-
-def _current_tick_ms():
-    if hasattr(kernel32, "GetTickCount64"):
-        return int(kernel32.GetTickCount64())
-    return int(kernel32.GetTickCount())
-
-def _seconds_since_last_input():
-    info = LASTINPUTINFO()
-    info.cbSize = ctypes.sizeof(LASTINPUTINFO)
-    if not user32.GetLastInputInfo(ctypes.byref(info)):
-        return None
-    elapsed_ms = _current_tick_ms() - int(info.dwTime)
-    if elapsed_ms < 0: elapsed_ms = 0
-    return elapsed_ms / 1000.0
 
 def get_foreground_info():
     try:
@@ -61,20 +75,12 @@ def get_foreground_info():
     except:
         return "Unknown", "Unknown"
 
-def _get_state():
-    app, title = get_foreground_info()
-    seconds = _seconds_since_last_input()
-    
-    if seconds is None: return "active", app, title
-    state = "idle" if seconds >= INPUT_IDLE_MINUTES * 60 else "active"
-    if state == "idle": app, title = "None", "None"
-    return state, app, title
-
-def _append_state(state, app, title):
+def _append_state(state, app, title, active_seconds):
     now = datetime.datetime.now().replace(microsecond=0)
     try:
         with open(LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(f"{now.isoformat()},{state},{app},{title}\n")
+            # Format: timestamp,state,app,title,active_seconds_in_period
+            f.write(f"{now.isoformat()},{state},{app},{title},{active_seconds}\n")
     except: pass
 
 def _rotate_log():
@@ -94,10 +100,17 @@ def _rotate_log():
     except: pass
 
 def main():
+    global active_seconds_set
     _ensure_log_dir()
     lock_file_handle = open(LOCK_FILE, 'w')
     try: msvcrt.locking(lock_file_handle.fileno(), msvcrt.LK_NBLCK, 1)
     except: sys.exit(0)
+
+    # Start listeners
+    mouse_listener = mouse.Listener(on_click=on_click, on_scroll=on_scroll, on_move=on_move)
+    key_listener = keyboard.Listener(on_press=on_press)
+    mouse_listener.start()
+    key_listener.start()
 
     should_run = {"value": True}
     def _stop_handler(_s, _f): should_run["value"] = False
@@ -105,15 +118,31 @@ def main():
     
     _rotate_log()
     
-    while should_run["value"]:
-        state, app, title = _get_state()
-        _append_state(state, app, title)
-        now = time.time()
-        time.sleep(POLL_SECONDS - (now % POLL_SECONDS))
-    
-    lock_file_handle.close()
-    try: os.remove(LOCK_FILE)
-    except: pass
+    try:
+        while should_run["value"]:
+            # Wait for the next poll interval
+            now = time.time()
+            sleep_time = POLL_SECONDS - (now % POLL_SECONDS)
+            time.sleep(sleep_time)
+            
+            # Capture current window and calculate activity for the period
+            app, title = get_foreground_info()
+            
+            with activity_lock:
+                # Count how many unique seconds had input
+                active_count = len(active_seconds_set)
+                active_seconds_set.clear()
+
+            # State is "active" if there was at least 1 second of input
+            state = "active" if active_count > 0 else "idle"
+            
+            _append_state(state, app, title, active_count)
+    finally:
+        mouse_listener.stop()
+        key_listener.stop()
+        lock_file_handle.close()
+        try: os.remove(LOCK_FILE)
+        except: pass
 
 if __name__ == "__main__":
     main()

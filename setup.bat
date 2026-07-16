@@ -28,7 +28,7 @@ echo [OK] Old instances stopped.
 echo.
 echo [2/5] Installing required Python libraries...
 python -m pip install --upgrade pip
-python -m pip install pywin32 rich psutil
+python -m pip install pywin32 rich psutil pynput
 if %errorlevel% neq 0 (
     echo [ERROR] Failed to install dependencies.
     pause
